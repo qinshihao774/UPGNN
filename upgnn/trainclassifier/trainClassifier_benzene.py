@@ -14,10 +14,10 @@ from torch_scatter import scatter_add, scatter
 from torch_geometric.nn.inits import glorot, zeros
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
 
-from upsegnn.dataset.mutagenicity import Mutagenicity
-from upsegnn.dataset.proteins import PROTEINS
-from upsegnn.downstream_model import MLP
+from upgnn.dataset.benzene import Benzene
+from upgnn.downstream_model import MLP
 from sklearn.metrics import f1_score, roc_auc_score
+from upgnn.dataset.mutag import Mutag
 from sklearn.metrics import accuracy_score, confusion_matrix
 
 patience = 8
@@ -238,6 +238,7 @@ class GCNConv(MessagePassing):  # 通过线性变换和消息传递更新节点�
         # 有向
         # idx = col if flow == 'source_to_target' else row
         # deg = scatter_add(edge_weight, row, dim=0, dim_size=num_nodes)
+        # 求°
         deg = scatter(edge_weight, row, dim=0, dim_size=num_nodes, reduce='mean')
         deg_inv_sqrt = deg.pow(-0.5)
         deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
@@ -349,7 +350,10 @@ class GNN(torch.nn.Module):
 
     def forward(self, data, isbatch=False):
         x, edge_index, batch = data.x, data.edge_index, data.batch
-        edge_weight = data.edge_weight if hasattr(data, 'edge_weight') else None
+        edge_attr = getattr(data, 'edge_attr', None)
+        # 判断是否有边权重
+        edge_weight = getattr(data, 'edge_weight', None)
+
         # device = x.device
         # edge_label = getattr(data, 'edge_label', None)  # 安全获取 edge_label
 
@@ -439,10 +443,10 @@ class GNNClassifier(torch.nn.Module):
         self.gnn.load_state_dict(torch.load(model_file, weights_only=True))
 
 
-def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=400, lr=0.01):
+def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=200, lr=1e-4):
     model = model.to(device)
-    train_loader = DataLoader(train_dataset, batch_size=6, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=6, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
     # Adam 不仅能够计算每个参数的自适应学习率，还会利用梯度的一阶矩估计（均值）和二阶矩估计（方差）来动态调整学习率。
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     # SGD 作为最基础的优化算法，其参数更新依据的是当前 batch 数据计算出的梯度，公式为：θ=θ−μ⋅∇L(θ)
@@ -466,7 +470,7 @@ def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=400, 
         for i, batch_data in enumerate(train_loader):
             batch = batch_data.to(device)
             batch.y = torch.where(batch.y == -1, torch.tensor(0.0), batch.y)
-            batch.y = batch.y.float()  # 去除一个维度
+            batch.y = batch.y.squeeze().float()  # 去除一个维度
 
             # 调试 batch 信息
             assert batch.batch.max() < batch.num_graphs, f"Batch index {batch.batch.max()} exceeds num_graphs {batch.num_graphs}"
@@ -482,7 +486,7 @@ def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=400, 
             # print("pred:", pred)
             # print("y:", batch.y)
             # torch.nn.CrossEntropyLoss 期望的输入 input 是 logits（即未经过 softmax 处理的得分）
-            loss = criterion(out, batch.y.long())
+            loss = criterion(out, batch.y.squeeze().long())
             loss.backward()
             optimizer.step()
 
@@ -503,11 +507,11 @@ def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=400, 
             for batch in val_loader:
                 batch = batch.to(device)
                 batch.y = torch.where(batch.y == -1, torch.tensor(0.0), batch.y)
-                batch.y = batch.y.float()  # 去除一个维度
+                batch.y = batch.y.squeeze().float()  # 去除一个维度
                 assert batch.batch.max() < batch.num_graphs, f"Batch index {batch.batch.max()} exceeds num_graphs {batch.num_graphs}"
                 out = model(batch, isbatch=True)
                 # pred = torch.argmax(out, dim=1)
-                loss = criterion(out, batch.y.long())
+                loss = criterion(out, batch.y.squeeze().long())
 
                 val_loss += loss.item() * batch.num_graphs
                 val_preds.extend(out.argmax(dim=1).cpu().numpy())
@@ -551,6 +555,7 @@ def evaluate_single_graph(classifier, graph, device):
         # print("Predicted Probabilities:", pred_prob)
         true_label = graph.y.item()
         predicted_label = torch.argmax(pred_prob, dim=0).item()
+        predicted_label = 1.0 if predicted_label == 1.0 else -1.0
     return true_label, predicted_label
 
 
@@ -559,11 +564,11 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # 示例数据集（需要替换为实际数据集）
-    # # TODO proteins:  Data(x=[23, 4], edge_index=[2, 104], y=[1]  y= 0 1, node_label=[23])
-    data_name = "proteins"
-    train_dataset = PROTEINS('train')
-    valid_dataset = PROTEINS('valid')
-    test_dataset = PROTEINS('test')
+    # # TODO benzene: Data(x=[12, 7], edge_index=[2, 132], y=[1], node_label=[12])
+    data_name = "benzene"
+    train_dataset = Benzene(mode="train")
+    valid_dataset = Benzene(mode="valid")
+    test_dataset = Benzene(mode="test")
 
     print("single data:", train_dataset[0])
     # # 检查数据集大小
@@ -576,27 +581,28 @@ def main():
 
     # 打印数据集标签的类别
     num_classes = train_dataset.num_classes
+    print("num_classes:", num_classes)
 
     # 初始化模型
     classifier = GNNClassifier(
         num_layer=3,
         emb_dim=node_in_dim,
-        hidden_dim=128,
+        hidden_dim=32,
         num_tasks=num_classes
     )
-    # TODO: Train proteins classifier
-    # best_model_state, history = train_gnn_classifier(
-    #     classifier,
-    #     train_dataset,
-    #     valid_dataset,
-    #     device
-    # )
+    # TODO: Train benzene classifier
+    best_model_state, history = train_gnn_classifier(
+        classifier,
+        train_dataset,
+        valid_dataset,
+        device
+    )
 
     # 保存最佳模型
     save_to = '../best_gnnclassifier/best_gnn_classifier_' + data_name + '.pt'
     # torch.save(best_model_state, save_to)
+    # print(f"GNNClassifier saved to {save_to}")
     # classifier.load_state_dict(best_model_state)
-
     classifier.load_state_dict(torch.load(save_to, weights_only=True))
 
     # 逐图测试嵌入
@@ -615,8 +621,7 @@ def main():
 
     # 计算混淆矩阵
     conf_matrix = confusion_matrix(true_labels_val, predicted_labels_val)
-    print("Confusion Matrix:")
-    print(conf_matrix)
+    print("Confusion Matrix:\n", conf_matrix)
     print("\n")
 
     # 逐图测试嵌入
@@ -637,8 +642,7 @@ def main():
 
     # 计算混淆矩阵
     conf_matrix = confusion_matrix(true_labels_test, predicted_labels_test)
-    print("Confusion Matrix:")
-    print(conf_matrix)
+    print("Confusion Matrix:\n", conf_matrix)
 
 
 if __name__ == "__main__":

@@ -7,14 +7,11 @@ import logging
 import torch
 from torch.utils.data import Subset
 from model import set_seed, generate_explanation, train, Pretrain_Explainer, retune
-
 from metrics import evaluate_single_graph, calculate_sparsity, compute_fidelity_minus, compute_fidelity_plus
-
-import trainClassifier_ogb
 from sklearn.metrics import accuracy_score, confusion_matrix
-from upsegnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
+from upgnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
     trainClassifier_dd, trainClassifier_mutag, trainClassifier_mutagenicity, trainClassifier_frankenstein, \
-    trainClassifier_bbbp
+    trainClassifier_bbbp,trainClassifier_ogb
 from utils.datasetutils import load_data
 from datetime import datetime
 
@@ -36,8 +33,8 @@ logging.basicConfig(
 logger = logging.getLogger()
 
 set_seed(42)
-exclude_data = 'frankenstein'
-dataset_list = ['bbbp', 'mutag', 'nci1', 'proteins', 'dd', 'mutagenicity', 'ogb']
+exclude_data = 'ogb'
+dataset_list = ['bbbp', 'mutag', 'nci1', 'proteins', 'dd', 'mutagenicity', 'frankenstein']
 # dataset_list = ['ogb']
 
 save_path = 'pretrained'
@@ -190,7 +187,6 @@ for dataset in dataset_list:
     print(f"\ndataset is {dataset},Refining...")
     classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset)
     PE.model = classifier
-
     train_sub_dataset = Subset(train_dataset, range(100))  # 前 100 个
     retune(PE, train_sub_dataset, device, epochs=3)
     # PE.generate_explanation(test_dataset, device)

@@ -8,13 +8,12 @@ import torch.nn.functional as F
 from torch_scatter import scatter_add, scatter
 from torch_geometric.nn.inits import glorot, zeros
 from torch_geometric.loader import DataLoader
-
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from sklearn.metrics import accuracy_score, confusion_matrix
 from collections import Counter
-
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
-from upsegnn.downstream_model import MLP
+from upgnn.downstream_model import MLP
+from ogb.graphproppred import PygGraphPropPredDataset
 
 patience = 12
 
@@ -475,7 +474,7 @@ class GNNClassifier(torch.nn.Module):
         self.gnn.load_state_dict(torch.load(model_file, weights_only=True))
 
 
-def train_gnn_classifier(model, train_dataset, val_dataset, device, num_epochs=600, lr=0.0005):
+def train_gnn_classifier(model, train_dataset, val_dataset, device, num_epochs=600, lr=0.005):
     model = model.to(device)
     # GNN 在训练过程中能够区分批量中的单个图信息结构。
     # 在 PyG 中，DataLoader 将多个图（Data 对象）组合成一个 Batch 对象。
@@ -621,9 +620,10 @@ def main():
 
     # TODO ogb: Data(edge_index=[2, 50], edge_attr=[50, 3], x=[24, 9], y=[1, 1], num_nodes=24)
     data_name = "ogb"
-    dataset = torch.load("../data/ogb/ogb_graph.pt", weights_only=False)
-    print(f"数据集大小: {len(dataset)}")
+    # dataset = torch.load("../data/ogb/ogb_graph.pt", weights_only=False) //不可以使用
+    dataset = PygGraphPropPredDataset(name='ogbg-molhiv', root='../data/ogb')
 
+    print(f"数据集大小: {len(dataset)}")
     split_idx = dataset.get_idx_split()
     train_dataset = dataset[split_idx['train']]
     valid_dataset = dataset[split_idx['valid']]

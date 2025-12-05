@@ -5,23 +5,18 @@ import torch
 
 from torch.nn import Parameter
 import torch.nn.functional as F
-
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import MessagePassing
 
-from torch_geometric.utils import add_self_loops, softmax, add_remaining_self_loops, spmm
-from torch_geometric.utils.num_nodes import maybe_num_nodes
+from torch_geometric.utils import add_self_loops, softmax, add_remaining_self_loops
 from torch_scatter import scatter_add, scatter
 from torch_geometric.nn.inits import glorot, zeros
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
 
-
-from upsegnn.downstream_model import MLP
+from upgnn.dataset.nci1 import NCI1
+from upgnn.downstream_model import MLP
 from sklearn.metrics import f1_score, roc_auc_score
-from upsegnn.dataset.mutag import Mutag
 from sklearn.metrics import accuracy_score, confusion_matrix
-
-from upsegnn.utils.datasetutils import GraphDataset
 
 patience = 8
 
@@ -40,9 +35,6 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)  # 多GPU时设置所有GPU的种子
     torch.backends.cudnn.deterministic = True  # 确保CuDNN的确定性
     torch.backends.cudnn.benchmark = False  # 禁用CuDNN的自动优化
-
-
-
 
 
 class GINConv(MessagePassing):
@@ -244,7 +236,6 @@ class GCNConv(MessagePassing):  # 通过线性变换和消息传递更新节点�
         # 有向
         # idx = col if flow == 'source_to_target' else row
         # deg = scatter_add(edge_weight, row, dim=0, dim_size=num_nodes)
-        # 求°
         deg = scatter(edge_weight, row, dim=0, dim_size=num_nodes, reduce='mean')
         deg_inv_sqrt = deg.pow(-0.5)
         deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
@@ -356,10 +347,10 @@ class GNN(torch.nn.Module):
 
     def forward(self, data, isbatch=False):
         x, edge_index, batch = data.x, data.edge_index, data.batch
+
         edge_attr = getattr(data, 'edge_attr', None)
         # 判断是否有边权重
         edge_weight = getattr(data, 'edge_weight', None)
-
         # device = x.device
         # edge_label = getattr(data, 'edge_label', None)  # 安全获取 edge_label
 
@@ -449,7 +440,7 @@ class GNNClassifier(torch.nn.Module):
         self.gnn.load_state_dict(torch.load(model_file, weights_only=True))
 
 
-def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=200, lr=1e-4):
+def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=500, lr=0.01):
     model = model.to(device)
     train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
@@ -512,7 +503,7 @@ def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=200, 
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(device)
-                batch.y = torch.where(batch.y == -1, torch.tensor(0.0), batch.y)
+                # batch.y = torch.where(batch.y == -1, torch.tensor(0.0), batch.y)
                 batch.y = batch.y.squeeze().float()  # 去除一个维度
                 assert batch.batch.max() < batch.num_graphs, f"Batch index {batch.batch.max()} exceeds num_graphs {batch.num_graphs}"
                 out = model(batch, isbatch=True)
@@ -558,10 +549,8 @@ def evaluate_single_graph(classifier, graph, device):
     with torch.no_grad():
         logists = classifier(graph)
         pred_prob = torch.softmax(logists, dim=1).squeeze()  # 转换为概率，形状 [2]
-        # print("Predicted Probabilities:", pred_prob)
         true_label = graph.y.item()
         predicted_label = torch.argmax(pred_prob, dim=0).item()
-        # predicted_label = 1.0 if predicted_label == 1.0 else -1.0
     return true_label, predicted_label
 
 
@@ -570,42 +559,11 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # 示例数据集（需要替换为实际数据集）
-    # # TODO bbbp: Data(x=[20, 5], edge_index=[2, 40], y=[1])   y= 1 0
-
-    # 重新加载完整 dataset
-    data_name = 'bbbp'
-
-    # ------------------- 1. 路径配置 -------------------
-    ROOT = '../data/bbbp'
-    DATA_PT = f'{ROOT}/processed/data.pt'  # 完整合并数据
-    TRAIN_IDX = f'{ROOT}/processed/train_idx.pt'
-    VALID_IDX = f'{ROOT}/processed/valid_idx.pt'
-    TEST_IDX = f'{ROOT}/processed/test_idx.pt'
-
-    # ------------------- 2. 加载 data + slices -------------------
-    data, slices = torch.load(DATA_PT, weights_only=False)
-
-    # ------------------- 3. 加载划分索引 -------------------
-    train_idx = torch.load(TRAIN_IDX, weights_only=False)
-    valid_idx = torch.load(VALID_IDX, weights_only=False)
-    test_idx = torch.load(TEST_IDX, weights_only=False)
-
-    # ------------------- 5. 创建三个子集 -------------------
-    train_dataset = GraphDataset(data, slices, train_idx)
-    valid_dataset = GraphDataset(data, slices, valid_idx)
-    test_dataset = GraphDataset(data, slices, test_idx)
-
-    # dataset = BBBPDataset(root='../data/bbbp/bbbp')
-    #
-    # # 加载划分索引
-    # train_idx = torch.load('../data/bbbp/processed/train_idx.pt', weights_only=False)
-    # valid_idx = torch.load('../data/bbbp/processed/valid_idx.pt', weights_only=False)
-    # test_idx = torch.load('../data/bbbp/processed/test_idx.pt', weights_only=False)
-    #
-    # # 创建子集
-    # train_dataset = SubsetDataset(dataset, train_idx)
-    # valid_dataset = SubsetDataset(dataset, valid_idx)
-    # test_dataset = SubsetDataset(dataset, test_idx)
+    # # TODO nci1: Data(x=[25, 37], edge_index=[2, 56], y=[1] y=0  1, node_label=[25])
+    data_name = "nci1"
+    train_dataset = NCI1('train')
+    valid_dataset = NCI1('valid')
+    test_dataset = NCI1('test')
 
     print("single data:", train_dataset[0])
     # # 检查数据集大小
@@ -623,10 +581,10 @@ def main():
     classifier = GNNClassifier(
         num_layer=3,
         emb_dim=node_in_dim,
-        hidden_dim=16,
+        hidden_dim=32,
         num_tasks=num_classes
     )
-    # TODO: Train bbbp classifier
+    # TODO: Train nci1 classifier
     # best_model_state, history = train_gnn_classifier(
     #     classifier,
     #     train_dataset,
@@ -657,7 +615,8 @@ def main():
 
     # 计算混淆矩阵
     conf_matrix = confusion_matrix(true_labels_val, predicted_labels_val)
-    print("Confusion Matrix:\n", conf_matrix)
+    print("Confusion Matrix:")
+    print(conf_matrix)
     print("\n")
 
     # 逐图测试嵌入
@@ -678,7 +637,8 @@ def main():
 
     # 计算混淆矩阵
     conf_matrix = confusion_matrix(true_labels_test, predicted_labels_test)
-    print("Confusion Matrix:\n", conf_matrix)
+    print("Confusion Matrix:")
+    print(conf_matrix)
 
 
 if __name__ == "__main__":

@@ -13,9 +13,10 @@ from torch_scatter import scatter_add, scatter
 from torch_geometric.nn.inits import glorot, zeros
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
 
-from upsegnn.dataset.nci1 import NCI1
-from upsegnn.downstream_model import MLP
+from upgnn.dataset.dd import DD
+from upgnn.downstream_model import MLP
 from sklearn.metrics import f1_score, roc_auc_score
+
 from sklearn.metrics import accuracy_score, confusion_matrix
 
 patience = 8
@@ -346,11 +347,13 @@ class GNN(torch.nn.Module):
             self.batch_norms.append(torch.nn.BatchNorm1d(out_dim))
 
     def forward(self, data, isbatch=False):
+
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
         edge_attr = getattr(data, 'edge_attr', None)
         # 判断是否有边权重
         edge_weight = getattr(data, 'edge_weight', None)
+
         # device = x.device
         # edge_label = getattr(data, 'edge_label', None)  # 安全获取 edge_label
 
@@ -440,7 +443,7 @@ class GNNClassifier(torch.nn.Module):
         self.gnn.load_state_dict(torch.load(model_file, weights_only=True))
 
 
-def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=500, lr=0.01):
+def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=350, lr=0.01):
     model = model.to(device)
     train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
@@ -466,7 +469,7 @@ def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=500, 
 
         for i, batch_data in enumerate(train_loader):
             batch = batch_data.to(device)
-            batch.y = torch.where(batch.y == -1, torch.tensor(0.0), batch.y)
+            batch.y = torch.where(batch.y == 2.0, torch.tensor(0.0), batch.y)
             batch.y = batch.y.squeeze().float()  # 去除一个维度
 
             # 调试 batch 信息
@@ -503,7 +506,7 @@ def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=500, 
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(device)
-                # batch.y = torch.where(batch.y == -1, torch.tensor(0.0), batch.y)
+                batch.y = torch.where(batch.y == 2.0, torch.tensor(0.0), batch.y)
                 batch.y = batch.y.squeeze().float()  # 去除一个维度
                 assert batch.batch.max() < batch.num_graphs, f"Batch index {batch.batch.max()} exceeds num_graphs {batch.num_graphs}"
                 out = model(batch, isbatch=True)
@@ -549,8 +552,10 @@ def evaluate_single_graph(classifier, graph, device):
     with torch.no_grad():
         logists = classifier(graph)
         pred_prob = torch.softmax(logists, dim=1).squeeze()  # 转换为概率，形状 [2]
+        # print("Predicted Probabilities:", pred_prob)
         true_label = graph.y.item()
         predicted_label = torch.argmax(pred_prob, dim=0).item()
+        predicted_label = 1.0 if predicted_label == 1.0 else 2.0
     return true_label, predicted_label
 
 
@@ -559,11 +564,11 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # 示例数据集（需要替换为实际数据集）
-    # # TODO nci1: Data(x=[25, 37], edge_index=[2, 56], y=[1] y=0  1, node_label=[25])
-    data_name = "nci1"
-    train_dataset = NCI1('train')
-    valid_dataset = NCI1('valid')
-    test_dataset = NCI1('test')
+    # # TODO dd: Data(x=[242, 82], edge_index=[2, 1106], y=[1] 1 2, node_label=[242])
+    data_name = "dd"
+    train_dataset = DD('train')
+    valid_dataset = DD('valid')
+    test_dataset = DD('test')
 
     print("single data:", train_dataset[0])
     # # 检查数据集大小
@@ -573,31 +578,33 @@ def main():
     node_in_dim = train_dataset[0].x.shape[1]
     print("node_in_dim:", node_in_dim)
     print("\n")
-
     # 打印数据集标签的类别
-    num_classes = train_dataset.num_classes
+    all_labels = [data.y.item() for data in train_dataset]
+    num_classes = len(set(all_labels))
+    print("num_classes:", num_classes)
+    num_tasks = num_classes
 
     # 初始化模型
     classifier = GNNClassifier(
         num_layer=3,
         emb_dim=node_in_dim,
         hidden_dim=32,
-        num_tasks=num_classes
+        num_tasks=num_tasks
     )
-    # TODO: Train nci1 classifier
-    # best_model_state, history = train_gnn_classifier(
-    #     classifier,
-    #     train_dataset,
-    #     valid_dataset,
-    #     device
-    # )
+    # # TODO: Train dd classifier
+    best_model_state, history = train_gnn_classifier(
+        classifier,
+        train_dataset,
+        valid_dataset,
+        device
+    )
 
     # 保存最佳模型
     save_to = '../best_gnnclassifier/best_gnn_classifier_' + data_name + '.pt'
-    # torch.save(best_model_state, save_to)
-    # print(f"GNNClassifier saved to {save_to}")
-    # classifier.load_state_dict(best_model_state)
-    classifier.load_state_dict(torch.load(save_to, weights_only=True))
+    torch.save(best_model_state, save_to)
+    print(f"GNNClassifier saved to {save_to}")
+    classifier.load_state_dict(best_model_state)
+    # classifier.load_state_dict(torch.load(save_to, weights_only=True))
 
     # 逐图测试嵌入
     print("val single graph pred_prob auc...")

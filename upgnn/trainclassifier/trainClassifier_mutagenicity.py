@@ -14,8 +14,8 @@ from torch_scatter import scatter_add, scatter
 from torch_geometric.nn.inits import glorot, zeros
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
 
-from upsegnn.dataset.mutagenicity import Mutagenicity
-from upsegnn.downstream_model import MLP
+from upgnn.dataset.mutagenicity import Mutagenicity
+from upgnn.downstream_model import MLP
 from sklearn.metrics import f1_score, roc_auc_score
 from sklearn.metrics import accuracy_score, confusion_matrix
 

@@ -5,113 +5,6 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix, f1_score, roc_auc_score
 
-
-# from torch_geometric.explain import unfaithfulness  # 评估解释的指标
-# from upsegnn.model import fn_softedgemask
-
-
-# def evaluate_fidelity_plus(model, classifier, dataset, device):
-#     """
-#     计算 Fidelity+ 指标，衡量图解释器识别关键子结构对模型预测的影响程度
-#     参数:
-#         model: 包含解释器（explainer）和编码器（embed_model）的模型
-#         classifier: 目标分类器，输入图输出预测结果
-#         dataset: PyG Data 对象列表（每个元素是图数据）
-#         device: torch.device，指定计算设备
-#         loss_fn: 损失函数，默认用 MSE，可替换为交叉熵等（需匹配任务）
-#     返回:
-#         avg_fidelity: 平均 Fidelity+ 分数
-#     """
-#     # 模型、分类器置为评估模式
-#     model.eval()
-#     classifier.eval()
-#     classifier.to(device)
-#
-#     # embed_model = model.embed_model.to(device)
-#     embed_model = classifier.gnn.to(device)
-#     mlp_explainer = model.explainer.to(device)
-#
-#     # total_loss = 0.0  # 累计所有图的损失
-#     num_graphs = 0  # 实际参与计算的有效图数量
-#     total_fidelity = 0.0
-#
-#     for graph in dataset:
-#         graph = graph.to(device)
-#         # 跳过空图（无节点或无边，无法计算）
-#         if graph.num_nodes == 0 or graph.edge_index.size(1) == 0:
-#             print("Warning: 跳过空图，无节点或无边")
-#             continue
-#
-#         #
-#         # # 原始预测
-#         # with torch.no_grad():
-#         #     original_pred = classifier(graph)
-#         # print("原始预测结果：", original_pred)
-#         # 这里简单假设是分类任务，取预测类别（你可根据实际任务调整，比如回归任务就不需要 argmax）
-#         # original_pred_label = original_pred.argmax(dim=1)
-#         # print("原始预测结果：", original_pred_label)
-#         # 计算原始预测正确的样本数量（如果是单样本图任务，比如图分类，这里就是 1 或 0，根据实际情况灵活改）
-#         # if (original_pred_label == graph.y):
-#         #     original_correct += 1
-#         # else:
-#         # raise ValueError("图数据需要包含 'y' 属性来进行预测准确率计算")
-#
-#         with torch.no_grad():
-#             # 1. 原始图预测：f(G)
-#             # 若分类器需要节点嵌入，先通过编码器获取；若直接用图数据，可简化
-#             _, node_embed = embed_model(graph, emb=True)  # 获取节点嵌入
-#             pred_orig = classifier(graph)  # 原始图预测结果
-#             pred_orig_prob = F.softmax(pred_orig, dim=-1)
-#             pred_orig_label = pred_orig.argmax(dim=-1)
-#
-#             # 2. 获取关键子结构掩码（节点/边掩码）：识别 S_i
-#             node_mask, _ = mlp_explainer.get_explain(data=graph, embed=node_embed, logits=pred_orig)
-#             # print("node_mask:", node_mask)
-#
-#             # 3. 生成移除关键子结构的子图：G \ S_i
-#             masked_data = mask_fn_nodemask(graph, node_mask, isFidelitPlus=True)  # mask_fn 需实现：用掩码过滤节点/边
-#
-#             # if masked_data.num_nodes == 0:
-#             #     print("Warning: 掩码后子图为空，跳过该图计算")
-#             #     continue
-#
-#         #         # 掩码后的预测
-#         #         with torch.no_grad():
-#         #             masked_pred = classifier(masked_data)
-#         #             print("masked_pred:", masked_pred)
-#         #             masked_pred_label = masked_pred.argmax(dim=1)
-#         #
-#         #             if (masked_pred_label == graph.y):
-#         #                 masked_correct += 1
-#         #
-#         #         # 计算 F+，这里根据你给的公式思路，类似 F = 1 - Acc(X')/Acc(X)，这里实现的是这个逻辑，你可根据实际需求调整公式定义
-#         #         if original_correct == 0:
-#         #             # 避免除以 0，可根据实际情况处理，这里简单返回一个特殊值或抛异常，也可调整计算逻辑
-#         #             raise ValueError("原始预测准确率为 0，无法计算 F+")
-#         #
-#         # f_plus = 1 - float(masked_correct) / float(original_correct)
-#         # print(f"Fidelity+: {f_plus:.4f}")
-#         # return f_plus
-#
-#         # 4. 子图预测：f(G \ S_i)
-#         pred_masked = classifier(masked_data)
-#         pred_masked_prob = F.softmax(pred_masked, dim=-1)
-#
-#         # 计算单图 F+ 得分
-#         if pred_orig_label == graph.y:
-#             fidelity_score = torch.norm(pred_orig_prob - pred_masked_prob, p=2).item()
-#         else:
-#             fidelity_score = 0.0
-#         total_fidelity += fidelity_score
-#         num_graphs += 1
-#
-#     # 计算平均 Fidelity+（避免除以 0，用 max 保证分母至少为 1）
-#     avg_fidelity = total_fidelity / max(num_graphs, 1)
-#
-#     print(f"平均 Fidelity+: {avg_fidelity:.4f}")
-#     # return total_fidelity
-
-
 def evaluate_embeddings(model, dataset, device):
     """
     使用逻辑回归评估整个数据集的嵌入，计算 AUC 分数，以衡量编码器性能。
@@ -156,7 +49,8 @@ def evaluate_single_graph(classifier, explainer, data, device):
     with torch.no_grad():
         embed, node_embed = classifier.gnn(data, isbatch=False)
         edge_mask = explainer.explainer(data=data, node_embed=node_embed)
-        masked_data_minus = explainer.fn_softedgemask(data, edge_mask, isFidelitPlus=False)
+        # masked_data_minus = explainer.fn_softedgemask(data, edge_mask, isFidelitPlus=False)
+        masked_data_minus = explainer.topk_edge_mask(data, edge_mask, isFidelitPlus=False)
         logists = classifier(masked_data_minus)
         pred_prob = torch.sigmoid(logists).squeeze()  # 转换为概率，形状 [2]
         true_label = data.y.item()
@@ -281,7 +175,7 @@ def compute_fidelity_plus(classifier, explainer, dataset, device: torch.device) 
 
             # 检查原始预测是否正确：I(ŷ_i == y_i)
             if pred_orig_label != graph.y:
-                num_graphs += 1
+                # num_graphs += 1
                 continue  # 如果预测错误，贡献为 0
 
             # 2. 生成关键子结构掩码（假设 explainer 返回 edge_mask 用于 Fidelity+）
@@ -289,7 +183,8 @@ def compute_fidelity_plus(classifier, explainer, dataset, device: torch.device) 
             _, node_embed = classifier.gnn(graph, isbatch=False)
             edge_mask = explainer.explainer(data=graph, node_embed=node_embed)
             # print(f"Edge mask mean: {edge_mask.mean():.4f}, min: {edge_mask.min():.4f}, max: {edge_mask.max():.4f}")
-            masked_data = explainer.fn_softedgemask(graph, edge_mask, isFidelitPlus=True)  # 非关键结构
+            # masked_data = explainer.fn_softedgemask(graph, edge_mask, isFidelitPlus=True)  # 非关键结构
+            masked_data = explainer.topk_edge_mask(graph, edge_mask, isFidelitPlus=True)  # 非关键结构
 
             if masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
                 continue  # 跳过空子图
@@ -342,7 +237,7 @@ def compute_fidelity_minus(classifier, explainer, dataset, device: torch.device)
             pred_orig_label = pred_orig.argmax(dim=-1)
 
             if pred_orig_label != graph.y:
-                num_graphs += 1
+                # num_graphs += 1
                 continue
 
             # 2. 生成关键子结构掩码
@@ -350,7 +245,8 @@ def compute_fidelity_minus(classifier, explainer, dataset, device: torch.device)
             _, node_embed = classifier.gnn(graph, isbatch=False)
             edge_mask = explainer.explainer(data=graph, node_embed=node_embed)
             # print(f"Edge mask mean: {edge_mask.mean():.4f}, min: {edge_mask.min():.4f}, max: {edge_mask.max():.4f}")
-            masked_data = explainer.fn_softedgemask(graph, edge_mask, isFidelitPlus=False)  # 关键结构
+            # masked_data = explainer.fn_softedgemask(graph, edge_mask, isFidelitPlus=False)  # 关键结构
+            masked_data = explainer.topk_edge_mask(graph, edge_mask, isFidelitPlus=False)  # 关键结构
 
             if masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
                 continue

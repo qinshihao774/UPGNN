@@ -14,7 +14,7 @@ from torch_geometric.data import Data, Batch
 from torch.utils.data import TensorDataset
 from torch.utils.data import DataLoader as tDataLoader
 from dig.sslgraph.method.contrastive.objectives import JSE_loss, NCE_loss
-from upsegnn.metrics import compute_fidelity_plus, compute_fidelity_minus
+from upgnn.metrics import compute_fidelity_plus, compute_fidelity_minus
 
 
 def set_seed(seed):
@@ -106,18 +106,18 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
         self.t1 = t1
         self.loss_type = loss_type
 
-    def concrete_sample(self, log_alpha, beta=1.0, training=True):
-        """Concrete 分布采样"""
-        if training:
-            debug_var = 0.0
-            bias = 0.0
-            random_noise = bias + torch.rand_like(log_alpha) * (1.0 - debug_var)
-            gate_inputs = torch.log(random_noise + 1e-10) - torch.log(1.0 - random_noise + 1e-10)
-            gate_inputs = (gate_inputs + log_alpha) / beta
-            gate_inputs = torch.sigmoid(gate_inputs)
-        else:
-            gate_inputs = torch.sigmoid(log_alpha)
-        return gate_inputs
+    # def concrete_sample(self, log_alpha, beta=1.0, training=True):
+    #     """Concrete 分布采样"""
+    #     if training:
+    #         debug_var = 0.0
+    #         bias = 0.0
+    #         random_noise = bias + torch.rand_like(log_alpha) * (1.0 - debug_var)
+    #         gate_inputs = torch.log(random_noise + 1e-10) - torch.log(1.0 - random_noise + 1e-10)
+    #         gate_inputs = (gate_inputs + log_alpha) / beta
+    #         gate_inputs = torch.sigmoid(gate_inputs)
+    #     else:
+    #         gate_inputs = torch.sigmoid(log_alpha)
+    #     return gate_inputs
 
     def __loss__(self, data, pred_y, tua, device):
         # /**
@@ -156,6 +156,7 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
 
         # F- 子图：保留高重要性边 重要结构子图
         masked_data_minus = fn_softedgemask(data, edge_mask, isFidelitPlus=False)
+        # masked_data_minus = self.topk_edge_mask(data, edge_mask, isFidelitPlus=False)
 
         # if masked_data_plus.num_nodes == 0 or masked_data_plus.edge_index.size(1) == 0 or \
         #         masked_data_minus.num_nodes == 0 or masked_data_minus.edge_index.size(1) == 0:
@@ -266,39 +267,6 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
                 break
             loss += JSE_loss([z1, z2])
         return loss / (i + 1.0)
-
-    # def triplet_loss_safe(self, embed_orig, pos_embeds, neg_embeds, tmp=1.0):
-    #     """
-    #     完全兼容：
-    #     loss = pe.triplet_loss_safe(embed, pos_embed.unsqueeze(0), neg_embeds, tmp)
-    #     """
-    #     device = embed_orig.device
-    #     # 不管你传进来什么鬼形状，我都要把它变成 [D]、[1,D]、[N,D]
-    #     embed_orig = embed_orig.view(-1)
-    #     pos_embeds = pos_embeds.view(-1, embed_orig.size(-1))
-    #     neg_embeds = neg_embeds.view(-1, embed_orig.size(-1))
-    #
-    #     #     # 归一化嵌入
-    #     anchor = embed_orig / (torch.norm(embed_orig, dim=-1, keepdim=True) + 1e-6)
-    #     pos = pos_embeds / (torch.norm(pos_embeds, dim=-1, keepdim=True) + 1e-6)
-    #     neg = neg_embeds / (torch.norm(neg_embeds, dim=-1, keepdim=True) + 1e-6)
-    #
-    #     # 2. 距离 = 1 - cos_sim
-    #     pos_dist = 1 - (anchor * pos).sum(dim=-1)  # [1]
-    #     # neg_dist = 1 - torch.matmul(anchor.unsqueeze(0), neg.T)  # [1, N]
-    #     neg_dist = 1 - (anchor.unsqueeze(0) * neg).sum(dim=-1)
-    #     # 3. Triplet：正样本要近，负样本要远
-    #     # loss = F.relu(neg_dist - pos_dist)  # [1, N]
-    #
-    #     # pos_dist = pos_dist.mean()
-    #     neg_dist = neg_dist.mean()
-    #
-    #     loss = -torch.log(pos_dist / (neg_dist + pos_dist + 1e-6))
-    #     # loss = loss.mean()  # 标量
-    #
-    #     # 4. 终极防炸
-    #     # print("loss: ", loss)
-    #     return loss if torch.isfinite(loss) else torch.tensor(0.0, device=device, requires_grad=True)
 
     def info_nce_loss(self, embed_orig, pos_embed, neg_embeds, tua=1.0):
         """
@@ -482,7 +450,7 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
                 embed, node_embed = self.model.gnn(data, isbatch=False)
                 edge_mask = self.explainer(data, node_embed)  # 节点掩码
 
-            self.visualize_subgraph(data, edge_mask, 12)
+            self.visualize_subgraph(data, edge_mask, 8)
 
     def visualize_subgraph(self, data, edge_mask, k=10):
         """
@@ -579,6 +547,22 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
         masked_data = data.clone()
         masked_data.edge_weight = masked_edge_weight
 
+        return masked_data
+
+    def topk_edge_mask(self, data, edge_mask, rate=0.5, isFidelitPlus=False) -> Data:
+        num_edges = data.edge_index.size(1)
+
+        # 1. 计算 hard_mask（0/1）
+        k = max(1, int(rate * num_edges))
+        threshold = edge_mask.topk(k).values.min()  # 取前topk比例的阈值
+        hard_mask = (edge_mask >= threshold).float()  # [E] → 0.0 or 1.0
+
+        # 2. 关键：子图用 hard_mask 关键，补图用 1 - hard_mask 非关键
+        final_mask = hard_mask if not isFidelitPlus else (1 - hard_mask)
+
+        # 3. 克隆 + 应用
+        masked_data = data.clone()
+        masked_data.edge_weight = final_mask  # [E]，自动广播
         return masked_data
 
     def __edge_mask_to_node__(self, data, edge_mask, top_k):  # 利用边掩码做节点掩码
@@ -1188,16 +1172,18 @@ def fn_softedgemask(data, edge_mask, isFidelitPlus=True):
     return masked_data
 
 
-def topk_edge_mask(data, edge_mask, rate=0.15, isFidelitPlus=False) -> Data:
+def topk_edge_mask(data, edge_mask, rate=0.25, isFidelitPlus=False) -> Data:
     num_edges = data.edge_index.size(1)
 
     # 1. 计算 hard_mask（0/1）
     k = max(1, int(rate * num_edges))
-    threshold = edge_mask.topk(k).values.min()
+    threshold = edge_mask.topk(k).values.min()  # 取前topk比例的阈值
     hard_mask = (edge_mask >= threshold).float()  # [E] → 0.0 or 1.0
 
-    # 2. 关键：子图用 hard_mask，补图用 1 - hard_mask
+    # 2. 关键：子图用 hard_mask 关键，补图用 1 - hard_mask 非关键
     final_mask = hard_mask if not isFidelitPlus else (1 - hard_mask)
+
+    print(f"TopK: {k} edges, threshold: {threshold:.4f}")
 
     # 3. 克隆 + 应用
     masked_data = data.clone()
@@ -1205,88 +1191,88 @@ def topk_edge_mask(data, edge_mask, rate=0.15, isFidelitPlus=False) -> Data:
     return masked_data
 
 
-def mask_fn_nodemask(data: Data, node_mask: torch.Tensor, isFidelitPlus=False) -> Data:
-    """
-    Subgraph building by selecting nodes from the original graph using node_mask.
-    All operations are performed on GPU.
-
-    Args:
-        data: torch_geometric.data.Data object (on cuda:0)
-        node_mask: torch.Tensor of shape [num_nodes], importance scores in [0, 1] (on cuda:0)
-        isFidelitPlus: bool, if True, remove high-score nodes (Fidelity+); else, keep high-score nodes (Fidelity-)
-
-    Returns:
-        subgraph: Data object representing the subgraph (on cuda:0)
-    """
-
-    g = data.clone()
-    # 确保输入在同一设备
-    assert node_mask.device == data.x.device, "node_mask and data must be on the same device"
-
-    # 动态设置移除/保留节点比例
-    max_remove_ratio = 0.3
-    min_keep_nodes = max(2, int(g.num_nodes * 0.5))
-    k = min(max(1, int(g.num_nodes * max_remove_ratio)), g.num_nodes - min_keep_nodes)
-
-    # 计算阈值（Top-K 高分节点的最低得分）
-    if k > 0:
-        threshold = torch.topk(node_mask, k, largest=True).values.min()
-    else:
-        threshold = node_mask.max() if isFidelitPlus else node_mask.min()
-
-    # 生成布尔掩码
-    node_mask_bool = node_mask < threshold if isFidelitPlus else node_mask >= threshold
-
-    # # 选择子图的节点
-    # node_idx = torch.where(node_mask_bool)[0]  # 选中的节点索引
-    # if node_idx.size(0) == 0:
-    #     # 如果子图为空，保留一个随机节点以避免空子图
-    #     node_idx = torch.tensor([torch.randint(0, g.num_nodes, (1,))], device=g.x.device)
-    #     print("Warning: 子图为空，保留一个随机节点")
-
-    node_idx = torch.where(node_mask_bool)[0]  # 选中的节点索引
-    if node_idx.size(0) == 0:
-        # 如果子图为空，取 node_mask 最小的 5 个节点
-        _, node_idx = torch.topk(node_mask, 5, largest=False)
-        print("Warning: 子图为空，取 node_mask 最小的 5 个节点")
-
-    # 提取子图的节点特征
-    ret_x = g.x[node_idx]
-
-    # 计算 edge_mask：边的两端节点都必须选中
-    row, col = g.edge_index
-    edge_mask = node_mask_bool[row] & node_mask_bool[col]
-
-    # 过滤边
-    ret_edge_index = g.edge_index[:, edge_mask]
-    ret_edge_attr = None if g.edge_attr is None else g.edge_attr[edge_mask]
-    # 提取子图的边标签
-    ret_edge_label = getattr(g, 'edge_label', None)  # 安全获取 ret_edge_label
-    # 老方法 不安全
-    # ret_edge_label = None if g.edge_label is None else g.edge_label[edge_mask]
-
-    # 重新编号边索引
-    node_map = torch.full((g.num_nodes,), -1, dtype=torch.long, device=g.x.device)
-    node_map[node_idx] = torch.arange(node_idx.size(0), device=g.x.device)
-    ret_edge_index = node_map[ret_edge_index]
-
-    # 处理 batch
-    ret_batch = g.batch[node_idx] if hasattr(g, 'batch') and g.batch is not None else None
-
-    # 复制原始图的标签（y）
-    # ret_y = g.y.clone() if hasattr(g, 'y') and g.y is not None else None
-
-    # 创建子图
-    subgraph = Data(
-        x=ret_x,
-        edge_index=ret_edge_index,
-        edge_attr=ret_edge_attr,
-        edge_label=ret_edge_label,
-        batch=ret_batch,
-        # y=ret_y,
-        # num_nodes=node_idx.size(0)
-    )
-    return subgraph
+# def mask_fn_nodemask(data: Data, node_mask: torch.Tensor, isFidelitPlus=False) -> Data:
+#     """
+#     Subgraph building by selecting nodes from the original graph using node_mask.
+#     All operations are performed on GPU.
+#
+#     Args:
+#         data: torch_geometric.data.Data object (on cuda:0)
+#         node_mask: torch.Tensor of shape [num_nodes], importance scores in [0, 1] (on cuda:0)
+#         isFidelitPlus: bool, if True, remove high-score nodes (Fidelity+); else, keep high-score nodes (Fidelity-)
+#
+#     Returns:
+#         subgraph: Data object representing the subgraph (on cuda:0)
+#     """
+#
+#     g = data.clone()
+#     # 确保输入在同一设备
+#     assert node_mask.device == data.x.device, "node_mask and data must be on the same device"
+#
+#     # 动态设置移除/保留节点比例
+#     max_remove_ratio = 0.3
+#     min_keep_nodes = max(2, int(g.num_nodes * 0.5))
+#     k = min(max(1, int(g.num_nodes * max_remove_ratio)), g.num_nodes - min_keep_nodes)
+#
+#     # 计算阈值（Top-K 高分节点的最低得分）
+#     if k > 0:
+#         threshold = torch.topk(node_mask, k, largest=True).values.min()
+#     else:
+#         threshold = node_mask.max() if isFidelitPlus else node_mask.min()
+#
+#     # 生成布尔掩码
+#     node_mask_bool = node_mask < threshold if isFidelitPlus else node_mask >= threshold
+#
+#     # # 选择子图的节点
+#     # node_idx = torch.where(node_mask_bool)[0]  # 选中的节点索引
+#     # if node_idx.size(0) == 0:
+#     #     # 如果子图为空，保留一个随机节点以避免空子图
+#     #     node_idx = torch.tensor([torch.randint(0, g.num_nodes, (1,))], device=g.x.device)
+#     #     print("Warning: 子图为空，保留一个随机节点")
+#
+#     node_idx = torch.where(node_mask_bool)[0]  # 选中的节点索引
+#     if node_idx.size(0) == 0:
+#         # 如果子图为空，取 node_mask 最小的 5 个节点
+#         _, node_idx = torch.topk(node_mask, 5, largest=False)
+#         print("Warning: 子图为空，取 node_mask 最小的 5 个节点")
+#
+#     # 提取子图的节点特征
+#     ret_x = g.x[node_idx]
+#
+#     # 计算 edge_mask：边的两端节点都必须选中
+#     row, col = g.edge_index
+#     edge_mask = node_mask_bool[row] & node_mask_bool[col]
+#
+#     # 过滤边
+#     ret_edge_index = g.edge_index[:, edge_mask]
+#     ret_edge_attr = None if g.edge_attr is None else g.edge_attr[edge_mask]
+#     # 提取子图的边标签
+#     ret_edge_label = getattr(g, 'edge_label', None)  # 安全获取 ret_edge_label
+#     # 老方法 不安全
+#     # ret_edge_label = None if g.edge_label is None else g.edge_label[edge_mask]
+#
+#     # 重新编号边索引
+#     node_map = torch.full((g.num_nodes,), -1, dtype=torch.long, device=g.x.device)
+#     node_map[node_idx] = torch.arange(node_idx.size(0), device=g.x.device)
+#     ret_edge_index = node_map[ret_edge_index]
+#
+#     # 处理 batch
+#     ret_batch = g.batch[node_idx] if hasattr(g, 'batch') and g.batch is not None else None
+#
+#     # 复制原始图的标签（y）
+#     # ret_y = g.y.clone() if hasattr(g, 'y') and g.y is not None else None
+#
+#     # 创建子图
+#     subgraph = Data(
+#         x=ret_x,
+#         edge_index=ret_edge_index,
+#         edge_attr=ret_edge_attr,
+#         edge_label=ret_edge_label,
+#         batch=ret_batch,
+#         # y=ret_y,
+#         # num_nodes=node_idx.size(0)
+#     )
+#     return subgraph
 
 
 def mask_fn_edgemask(data: Data, hard_edge_mask: torch.Tensor, isFidelitPlus: bool) -> Data:
@@ -1358,144 +1344,3 @@ def mask_fn_edgemask(data: Data, hard_edge_mask: torch.Tensor, isFidelitPlus: bo
         batch=ret_batch,
     )
     return subgraph
-
-#
-# def compute_fidelity_plus(classifier, exp_model, dataset, device: torch.device) -> float:
-#     """
-#     计算 Fidelity+ 分数：移除关键子结构后预测变化的平均 L2 范数（仅当原始预测正确时）。
-# 
-#     Args:
-#         classifier: GNN 分类器模型
-#         dataset: PyG Data 对象列表
-#         explainer: 解释器函数，返回 (node_mask, edge_mask)
-#         device: 计算设备
-# 
-#     Returns:
-#         avg_fidelity_plus: 平均 Fidelity+ 分数
-#     """
-#     classifier.eval()
-#     exp_model.eval()
-#     classifier.to(device)
-#     exp_model.to(device)
-#     gcn = classifier.gnn
-# 
-#     total_fidelity = 0.0
-#     num_graphs = 0  # 有效图数量（原始预测正确且子图非空）
-# 
-#     for graph in dataset:
-#         graph = graph.to(device)
-#         if graph.num_nodes == 0 or graph.edge_index.size(1) == 0:
-#             continue
-# 
-#         with torch.no_grad():
-#             # 1. 原始图预测：σ(f(G_i))
-#             pred_orig = classifier(graph)
-#             pred_orig_prob = F.softmax(pred_orig, dim=-1)
-#             pred_orig_label = pred_orig.argmax(dim=-1)
-#             # print("原始预测结果：", pred_orig_label)
-# 
-#             # 检查原始预测是否正确：I(ŷ_i == y_i)
-#             if pred_orig_label != graph.y:
-#                 num_graphs += 1
-#                 continue  # 如果预测错误，贡献为 0
-# 
-#             # 2. 生成关键子结构掩码（假设 explainer 返回 edge_mask 用于 Fidelity+）
-#             # _, node_embed = classifier.gnn(graph, emb=True)
-#             _, node_embed = gcn(graph, isbatch=False)
-#             node_mask, edge_mask = exp_model.explainer(data=graph, embed=node_embed, mode='explain')
-# 
-#             # k = 7
-#             # top_k_indices = torch.topk(edge_mask, k=k, dim=0).indices  # 获取前k个最高值的索引
-#             # hard_edge_mask = torch.zeros_like(edge_mask, dtype=torch.bool)  # 初始化布尔掩码
-#             # hard_edge_mask[top_k_indices] = True  # 设置前k个边为True
-#             # hard_edge_mask = hard_edge_mask.detach()  # 分离梯度
-# 
-#             masked_data = fn_softedgemask(graph, node_mask, edge_mask, isFidelitPlus=True)  # 非关键结构
-# 
-#             if masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
-#                 continue  # 跳过空子图
-# 
-#             # 4. 子图预测：σ(f(G_i \ S_i))
-#             pred_masked = classifier(masked_data)
-#             pred_masked_prob = F.softmax(pred_masked, dim=-1)
-# 
-#             # 5. 计算 L2 范数：||σ(f(G_i)) - σ(f(G_i \ S_i))||_2
-#             fidelity_score = torch.norm(pred_orig_prob - pred_masked_prob, p=2).item()
-#             total_fidelity += fidelity_score
-#             num_graphs += 1
-# 
-#     avg_fidelity_plus = total_fidelity / max(num_graphs, 1)
-#     # print(f"Average Fidelity+: {avg_fidelity_plus:.4f} (over {num_graphs} valid graphs)")
-#     print(f"Average Fidelity+: {avg_fidelity_plus:.4f}")
-#     return avg_fidelity_plus
-# 
-# 
-# def compute_fidelity_minus(classifier, exp_model, dataset, device: torch.device) -> float:
-#     """
-#     计算 Fidelity- 分数：保留关键子结构后预测相似性的平均 L2 范数（低值表示好）。
-# 
-#     Args:
-#         classifier: GNN 分类器模型
-#         dataset: PyG Data 对象列表
-#         explainer: 解释器函数，返回 (node_mask, edge_mask)
-#         device: 计算设备
-# 
-#     Returns:
-#         avg_fidelity_minus: 平均 Fidelity- 分数
-#     """
-#     classifier.eval()
-#     exp_model.eval()
-#     classifier.to(device)
-#     exp_model.to(device)
-#     gcn = classifier.gnn
-# 
-#     total_fidelity = 0.0
-#     num_graphs = 0
-# 
-#     for graph in dataset:
-#         graph = graph.to(device)
-#         if graph.num_nodes == 0 or graph.edge_index.size(1) == 0:
-#             continue
-# 
-#         with torch.no_grad():
-#             # 1. 原始图预测：σ(f(G_i))
-#             pred_orig = classifier(graph)
-#             pred_orig_prob = F.softmax(pred_orig, dim=-1)
-#             pred_orig_label = pred_orig.argmax(dim=-1)
-# 
-#             if pred_orig_label != graph.y:
-#                 num_graphs += 1
-#                 continue
-# 
-#             # 2. 生成关键子结构掩码
-#             # _, node_embed = classifier.gnn(graph, emb=True)
-#             _, node_embed = gcn(graph, isbatch=False)
-#             node_mask, edge_mask = exp_model.explainer(data=graph, embed=node_embed, mode='explain')
-# 
-#             # 3. 构造 G_i \ S_i（移除高重要性边）
-#             # threshold = edge_mask.mean()
-#             # hard_edge_mask = (edge_mask > threshold).detach()
-# 
-#             # k = 7
-#             # top_k_indices = torch.topk(edge_mask, k=k, dim=0).indices  # 获取前k个最高值的索引
-#             # hard_edge_mask = torch.zeros_like(edge_mask, dtype=torch.bool)  # 初始化布尔掩码
-#             # hard_edge_mask[top_k_indices] = True  # 设置前k个边为True
-#             # hard_edge_mask = hard_edge_mask.detach()  # 分离梯度
-# 
-#             masked_data = fn_softedgemask(graph, node_mask, edge_mask, isFidelitPlus=False)  # 关键结构
-# 
-#             if masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
-#                 continue
-# 
-#             # 4. 子图预测：σ(f(S_i))
-#             pred_masked = classifier(masked_data)
-#             pred_masked_prob = F.softmax(pred_masked, dim=-1)
-# 
-#             # 5. 计算 L2 范数：||σ(f(G_i)) - σ(f(S_i))||_2（低值表示 S_i 足以代表 G_i）
-#             fidelity_score = torch.norm(pred_orig_prob - pred_masked_prob, p=2).item()
-#             total_fidelity += fidelity_score
-#             num_graphs += 1
-# 
-#     avg_fidelity_minus = total_fidelity / max(num_graphs, 1)
-#     print(f"Average Fidelity-: {avg_fidelity_minus:.4f} ")
-#     return avg_fidelity_minus

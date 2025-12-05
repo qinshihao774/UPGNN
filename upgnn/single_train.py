@@ -7,13 +7,14 @@ from torch.utils.data import Subset
 from torch_geometric.loader import DataLoader
 from model import set_seed, generate_explanation, train, Pretrain_Explainer, retune
 from metrics import evaluate_single_graph, calculate_sparsity, compute_fidelity_minus, compute_fidelity_plus
-import trainClassifier_ogb
 from sklearn.metrics import accuracy_score, confusion_matrix
-from upsegnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
+from upgnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
     trainClassifier_dd, trainClassifier_mutag, trainClassifier_mutagenicity, trainClassifier_bbbp, \
-    trainClassifier_frankenstein
+    trainClassifier_frankenstein,trainClassifier_ogb
 from utils.datasetutils import load_data
 from datetime import datetime
+
+
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
@@ -34,7 +35,7 @@ logger = logging.getLogger()
 
 ## In[Settings]
 set_seed(42)
-data_name = 'ba2motif'
+data_name = 'ogb'
 save_path = 'pretrained'
 train_dataset, valid_dataset, test_dataset = load_data(data_name)
 # train_dataset, valid_dataset, test_dataset = load_data("mutagenicity")
@@ -76,14 +77,14 @@ print(f'edge_dim：{edge_in_dim}')
 
 # [classifier]
 # ba2motif
-classifier = trainClassifier_ba2motif.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=12,
-                                                    num_tasks=num_tasks).to(device)
+# classifier = trainClassifier_ba2motif.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=12,
+#                                                     num_tasks=num_tasks).to(device)
 # mutag
 # classifier = trainClassifier_mutag.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
 #                                                  num_tasks=num_tasks).to(device)
 # ogb
-# classifier = trainClassifier_ogb.GNNClassifier(num_layer=2, emb_dim=node_in_dim, hidden_dim=32,
-#                                                num_tasks=num_tasks).to(device)
+classifier = trainClassifier_ogb.GNNClassifier(num_layer=2, emb_dim=node_in_dim, hidden_dim=32,
+                                               num_tasks=num_tasks).to(device)
 # mutagenicity
 # classifier = trainClassifier_mutagenicity.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
 #                                                         num_tasks=num_tasks).to(device)
@@ -107,16 +108,16 @@ classifier.load_state_dict(torch.load(Classifier_path, weights_only=True))
 PE = Pretrain_Explainer(classifier, 5, 256, device, explain_graph=True, loss_type='NCE')  # 初始化解释器
 
 # TODO: single dataset train...
-num = int(len(train_dataset) * 0.1)
+# num = int(len(train_dataset) * 0.1)
 # train_sub_dataset = Subset(train_dataset, range(100))  # 前 10%
-# train(PE, train_sub_dataset, valid_dataset, logger, pretrained_Explainer_path, device, epochs=5)
+# train(PE, train_dataset, valid_dataset, logger, pretrained_Explainer_path, device, epochs=5)
 # PE.explainer.load_state_dict(torch.load(pretrained_Explainer_path, weights_only=True))
 # torch.save(PE.explainer.state_dict(), pretrained_Explainer_path)
 PE.explainer.load_state_dict(torch.load(pretrained_Explainer_path, weights_only=True))
 # PE.generate_explanation(test_dataset, device)
 
 print("--------------done!-----------------")
-PE.generate_explanation(test_dataset, device)
+# PE.generate_explanation(test_dataset, device)
 with torch.no_grad():
     # # 逐图验证
     print("Evaluating fidelity...")
@@ -124,6 +125,8 @@ with torch.no_grad():
     print(f"Average Fidelity+: {avg_fidelity_plus:.4f}")
     avg_fidelity_minus = compute_fidelity_minus(classifier, PE, test_dataset, device)
     print(f"Average Fidelity-: {avg_fidelity_minus:.4f}")
+
+
     # calculate_sparsity(classifier, PE, test_dataset, device, is_dataloader=False)
     print("--------------done!-----------------")
 

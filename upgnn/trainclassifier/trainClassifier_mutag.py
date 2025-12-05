@@ -1,9 +1,5 @@
 import os
 import random
-
-import networkx as nx
-from torch_geometric.utils import to_networkx
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -17,11 +13,9 @@ from torch_geometric.utils.num_nodes import maybe_num_nodes
 from torch_scatter import scatter_add, scatter
 from torch_geometric.nn.inits import glorot, zeros
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
-
-from upsegnn.dataset.ba2motif import BA2Motif
-from upsegnn.downstream_model import MLP
+from upgnn.downstream_model import MLP
 from sklearn.metrics import f1_score, roc_auc_score
-from upsegnn.dataset.mutag import Mutag
+from upgnn.dataset.mutag import Mutag
 from sklearn.metrics import accuracy_score, confusion_matrix
 
 patience = 8
@@ -242,6 +236,7 @@ class GCNConv(MessagePassing):  # 通过线性变换和消息传递更新节点�
         # 有向
         # idx = col if flow == 'source_to_target' else row
         # deg = scatter_add(edge_weight, row, dim=0, dim_size=num_nodes)
+        # 求°
         deg = scatter(edge_weight, row, dim=0, dim_size=num_nodes, reduce='mean')
         deg_inv_sqrt = deg.pow(-0.5)
         deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
@@ -249,6 +244,29 @@ class GCNConv(MessagePassing):  # 通过线性变换和消息传递更新节点�
 
         return edge_index, edge_weight
 
+    # TODO:MUTAG
+    # def forward(self, x, edge_index, edge_attr=None, edge_label=None):
+    #     device = x.device
+    #     edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+    #     # num_edge_features = edge_attr.size(1) if edge_attr is not None else 1
+    #     num_edge_features = num_bond_type
+    #
+    #     if edge_label is not None:
+    #         # 确保 edge_label 是 int64 类型
+    #         edge_label = edge_label.to(dtype=torch.int64, device=device)
+    #         edge_attr = torch.zeros((edge_label.size(0), num_edge_features), device=device, dtype=x.dtype)
+    #         edge_attr.scatter_(1, edge_label.unsqueeze(1), 1)
+    #
+    #     # num_self_loops = x.size(0)  # 节点数目
+    #     self_loop_attr = torch.zeros(x.size(0), num_edge_features, device=device, dtype=x.dtype)
+    #     edge_attr = torch.cat((edge_attr, self_loop_attr), dim=0) if edge_attr is not None else self_loop_attr
+    #
+    #     edge_types = torch.argmax(edge_attr, dim=1)  # 形状: (num_edges + num_nodes,)
+    #     edge_embeddings = self.edge_embedding1(edge_types)
+    #
+    #     norm = self.norm(edge_index, x.size(0), x.dtype)
+    #     x = self.linear(x)  # 线性变换
+    #     return self.propagate(edge_index, x=x, edge_attr=edge_embeddings, norm=norm)
 
     # 调用时机：self.propagate 在处理每条边时，会调用 message 函数来生成消息。
     # 具体来说，message 函数在 propagate 内部被调用，针对每条边 (i, j)（i 是目标节点，j 是源节点）生成消息。
@@ -330,15 +348,27 @@ class GNN(torch.nn.Module):
 
     def forward(self, data, isbatch=False):
         x, edge_index, batch = data.x, data.edge_index, data.batch
-        # 判断是否有边属性
         edge_attr = getattr(data, 'edge_attr', None)
         # 判断是否有边权重
         edge_weight = getattr(data, 'edge_weight', None)
 
+        # device = x.device
+        # edge_label = getattr(data, 'edge_label', None)  # 安全获取 edge_label
+
+        # print(data.x)  # 检查 one-hot 编码
+        # data.atom_types = torch.argmax(data.x, dim=1) + 1  # 获取原子类型索引 从1开始
+        # print("原子索引范围：", data.atom_types)  # 检查索引范围
+
+        # weight 是 nn.Embedding 模块的可学习参数，表示嵌入矩阵。
+        # self.x_embedding1.weight.data = torch.cat(
+        #     [torch.zeros(1, self.emb_dim).to(device), self.x_embedding1.weight.data[1:]], 0)
+
+        # x = self.x_embedding1(data.atom_types)  # 这里传入的就是X特征矩阵 节点表示 形状: (num_nodes, emb_dim)
+
         h_list = [x]
         for layer in range(self.num_layer):  # 3层GCN
             # h = self.gnns[layer](h_list[layer], edge_index, edge_attr, edge_label)
-            h = self.gnns[layer](h_list[layer], edge_index, edge_weight)  # 这里可以是edge_attr或edge_weight
+            h = self.gnns[layer](h_list[layer], edge_index, edge_weight)  # 这里的edge_attr就是权重
             h = self.batch_norms[layer](h)
             if layer == self.num_layer - 1:
                 h = F.dropout(h, self.drop_ratio)
@@ -411,7 +441,7 @@ class GNNClassifier(torch.nn.Module):
         self.gnn.load_state_dict(torch.load(model_file, weights_only=True))
 
 
-def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=100, lr=0.0001):
+def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=200, lr=0.01):
     model = model.to(device)
     train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
@@ -438,7 +468,7 @@ def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=100, 
         for i, batch_data in enumerate(train_loader):
             batch = batch_data.to(device)
             # batch.y = torch.where(batch.y == -1, torch.tensor(0.0), batch.y)
-            batch.y = batch.y.squeeze().float()  # 去除一个维度
+            # batch.y = batch.y.squeeze().float()  # 去除一个维度
 
             # 调试 batch 信息
             assert batch.batch.max() < batch.num_graphs, f"Batch index {batch.batch.max()} exceeds num_graphs {batch.num_graphs}"
@@ -475,7 +505,7 @@ def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=100, 
             for batch in val_loader:
                 batch = batch.to(device)
                 # batch.y = torch.where(batch.y == -1, torch.tensor(0.0), batch.y)
-                batch.y = batch.y.squeeze().float()  # 去除一个维度
+                # batch.y = batch.y.squeeze().float()  # 去除一个维度
                 assert batch.batch.max() < batch.num_graphs, f"Batch index {batch.batch.max()} exceeds num_graphs {batch.num_graphs}"
                 out = model(batch, isbatch=True)
                 # pred = torch.argmax(out, dim=1)
@@ -520,8 +550,10 @@ def evaluate_single_graph(classifier, graph, device):
     with torch.no_grad():
         logists = classifier(graph)
         pred_prob = torch.softmax(logists, dim=1).squeeze()  # 转换为概率，形状 [2]
+        # print("Predicted Probabilities:", pred_prob)
         true_label = graph.y.item()
         predicted_label = torch.argmax(pred_prob, dim=0).item()
+        # predicted_label = 1.0 if predicted_label == 1.0 else -1.0
     return true_label, predicted_label
 
 
@@ -530,11 +562,11 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # 示例数据集（需要替换为实际数据集）
-    # # TODO ba2motif: single data: Data(x=[25, 10], edge_index=[2, 86], y=[1] 0 1 , exp_gt=[6, 2])
-    data_name = "ba2motif"
-    train_dataset = BA2Motif('../data/ba2motif', 'train')
-    valid_dataset = BA2Motif('../data/ba2motif', 'valid')
-    test_dataset = BA2Motif('../data/ba2motif', 'test')
+    # # TODO mutag: Data(x=[17, 7], edge_index=[2, 38], y=[1, 1], node_label=[17], edge_label=[38], node_type=[17])
+    data_name = "mutag"
+    train_dataset = Mutag(root='../data/mutag', split='train')
+    valid_dataset = Mutag(root='../data/mutag', split='val')
+    test_dataset = Mutag(root='../data/mutag', split='test')
 
     print("single data:", train_dataset[0])
     # # 检查数据集大小
@@ -543,8 +575,6 @@ def main():
     print(f"Test size: {len(test_dataset)}")
     node_in_dim = train_dataset[0].x.shape[1]
     print("node_in_dim:", node_in_dim)
-
-    print("exp_gt:", train_dataset[0].exp_gt)
     print("\n")
 
     # 打印数据集标签的类别
@@ -554,23 +584,23 @@ def main():
     classifier = GNNClassifier(
         num_layer=3,
         emb_dim=node_in_dim,
-        hidden_dim=16,
+        hidden_dim=32,
         num_tasks=num_classes
     )
-    # TODO: Train ba2motif classifier
-    best_model_state, history = train_gnn_classifier(
-        classifier,
-        train_dataset,
-        valid_dataset,
-        device
-    )
+    # TODO: Train mutag classifier
+    # best_model_state, history = train_gnn_classifier(
+    #     classifier,
+    #     train_dataset,
+    #     valid_dataset,
+    #     device
+    # )
 
     # 保存最佳模型
     save_to = '../best_gnnclassifier/best_gnn_classifier_' + data_name + '.pt'
-    torch.save(best_model_state, save_to)
-    print(f"GNNClassifier saved to {save_to}")
-    classifier.load_state_dict(best_model_state)
-    # classifier.load_state_dict(torch.load(save_to, weights_only=True))
+    # torch.save(best_model_state, save_to)
+    # print(f"GNNClassifier saved to {save_to}")
+    # classifier.load_state_dict(best_model_state)
+    classifier.load_state_dict(torch.load(save_to, weights_only=True))
 
     # 逐图测试嵌入
     print("val single graph pred_prob auc...")
@@ -578,8 +608,6 @@ def main():
     true_labels_val = []
     predicted_labels_val = []
     for graph in valid_dataset:
-        # print("data expgt:",graph.exp_gt)
-
         true_label, predicted_label = evaluate_single_graph(classifier, graph, device)
         true_labels_val.append(true_label)
         predicted_labels_val.append(predicted_label)
@@ -590,8 +618,7 @@ def main():
 
     # 计算混淆矩阵
     conf_matrix = confusion_matrix(true_labels_val, predicted_labels_val)
-    print("Confusion Matrix:")
-    print(conf_matrix)
+    print("Confusion Matrix:\n", conf_matrix)
     print("\n")
 
     # 逐图测试嵌入
@@ -612,8 +639,7 @@ def main():
 
     # 计算混淆矩阵
     conf_matrix = confusion_matrix(true_labels_test, predicted_labels_test)
-    print("Confusion Matrix:")
-    print(conf_matrix)
+    print("Confusion Matrix:\n", conf_matrix)
 
 
 if __name__ == "__main__":

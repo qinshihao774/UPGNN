@@ -1,11 +1,11 @@
 from dig.xgraph.method.base_explainer import ExplainerBase
 from dig.xgraph.method.utils import symmetric_edge_mask_indirect_graph
 
-from upsegnn import trainClassifier_ogb
-from upsegnn.dataset.mutag import Mutag
-from upsegnn.trainclassifier import trainClassifier_mutag
+from upgnn.trainclassifier import trainClassifier_ogb
+from upgnn.dataset.mutag import Mutag
+from upgnn.trainclassifier import trainClassifier_mutag
 from sklearn.metrics import accuracy_score, confusion_matrix
-from upsegnn.model import mask_fn_edgemask
+from upgnn.model import mask_fn_edgemask
 
 import torch
 import os

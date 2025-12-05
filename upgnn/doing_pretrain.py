@@ -5,18 +5,14 @@ import random
 import numpy as np
 import logging
 import torch
-from torch.utils.data import Subset
-
+from torch_geometric.loader import DataLoader
 from model import set_seed, generate_explanation, train, Pretrain_Explainer, retune
-
+from torch.utils.data import Subset
 from metrics import evaluate_single_graph, calculate_sparsity, compute_fidelity_minus, compute_fidelity_plus
 
-import trainClassifier_ogb
 from sklearn.metrics import accuracy_score, confusion_matrix
-from upsegnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
-    trainClassifier_dd, trainClassifier_mutag, trainClassifier_mutagenicity, trainClassifier_frankenstein, \
-    trainClassifier_bbbp
-from utils.datasetutils import load_data
+
+from utils.datasetutils import select_func
 from datetime import datetime
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -25,7 +21,6 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 log_dir = "./logs"
 os.makedirs(log_dir, exist_ok=True)
 log_file = f"{log_dir}/trainlog_{datetime.now().strftime('%m%d_%H%M%S')}.log"
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(message)s',
@@ -36,78 +31,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
+## In[Settings]
 set_seed(42)
-exclude_data = 'nci1'
-dataset_list = ['bbbp', 'mutag', 'proteins', 'dd', 'mutagenicity', 'ogb', 'frankenstein']
-# dataset_list = ['ogb']
+dataset_list = ['ba2motif', 'bbbp', 'mutag', 'nci1', 'proteins', 'dd', 'mutagenicity', 'ogb', 'frankenstein']
 
 save_path = 'pretrained'
 # train_dataset, valid_dataset, test_dataset = load_data(data_name)
 # Classifier_path = './best_gnnclassifier/best_gnn_classifier_' + data_name + '.pt'
 # pretrained_Explainer_path = './pretrained/trained_explainer_graph_' + data_name + '.pt'
-pretrained_Explainer_path = './pretrained/pretrained_explainer_exclude_' + exclude_data + '.pt'
+pretrained_Explainer_path = './pretrained/pretrained_explainer_all.pt'
 # pretrained_gnn_path = './pretrained/trained_gnnEncoder_graph_' + data_name + '.pt'
 # pretrained_model_path = './pretrained/trained_model_graph_' + data_name + '.pt'
 os.makedirs(save_path, exist_ok=True)  # exist_ok=True 创建目录时，如果目录已经存在，则不报错
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 ## In[Dataset]
-def select_func(data_name):
-    train_dataset, valid_dataset, test_dataset = load_data(data_name)
-    Classifier_path = './best_gnnclassifier/best_gnn_classifier_' + data_name + '.pt'
-
-    # # 检查数据集大小
-    print(f"{data_name}_dataset single data:", train_dataset[0])
-    print(f"Train size: {len(train_dataset)}")
-    print(f"Val size: {len(valid_dataset)}")
-    print(f"Test size: {len(test_dataset)}")
-
-    # 检查数据集标签
-    all_labels = [data.y.item() for data in train_dataset]
-    num_classes = len(set(all_labels))
-    print("num_classes:", num_classes)
-    num_tasks = num_classes
-
-    ## In[统一打印]
-    node_in_dim = train_dataset[0].x.shape[1]  # 节点维度
-    print(f'node_dim：{node_in_dim}')
-    edge_in_dim = train_dataset[0].edge_index.shape[1]
-    print(f'edge_dim：{edge_in_dim}')
-
-    if data_name == 'ba2motif':
-        classifier = trainClassifier_ba2motif.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=12,
-                                                            num_tasks=num_tasks).to(device)
-    elif data_name == 'mutag':
-        classifier = trainClassifier_mutag.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
-                                                         num_tasks=num_tasks).to(device)
-    elif data_name == 'nci1':
-        classifier = trainClassifier_nci1.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
-                                                        num_tasks=num_tasks).to(device)
-    elif data_name == 'proteins':
-        classifier = trainClassifier_proteins.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=128,
-                                                            num_tasks=num_tasks).to(device)
-    elif data_name == 'dd':
-        classifier = trainClassifier_dd.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
-                                                      num_tasks=num_tasks).to(device)
-    elif data_name == 'mutagenicity':
-        classifier = trainClassifier_mutagenicity.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
-                                                                num_tasks=num_tasks).to(device)
-    elif data_name == 'ogb':
-        classifier = trainClassifier_ogb.GNNClassifier(num_layer=2, emb_dim=node_in_dim, hidden_dim=32,
-                                                       num_tasks=num_tasks).to(device)
-    elif data_name == 'frankenstein':
-        classifier = trainClassifier_frankenstein.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=300,
-                                                                num_tasks=num_tasks).to(device)
-    elif data_name == 'bbbp':
-        classifier = trainClassifier_bbbp.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=16,
-                                                        num_tasks=num_tasks).to(device)
-
-    classifier.load_state_dict(torch.load(Classifier_path, weights_only=True))  # 加载预训练分类器
-
-    return classifier, train_dataset, valid_dataset, test_dataset
-
-
 # DataLoader用于从数据集加载数据并将其组织成小批量的工具类
 # train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
 # val_loader = DataLoader(valid_dataset, batch_size=2, shuffle=True)
@@ -117,20 +55,20 @@ classifier = None
 PE = Pretrain_Explainer(classifier, 5, 256, device, explain_graph=True, loss_type='NCE')  # 初始化解释器
 
 # # TODO: mutiple dataset pretrain...
-for dataset in dataset_list:
-    print(f"dataset is {dataset}, Pretraining...")
-    classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset)
-    PE.model = classifier
-    train(PE, train_dataset, valid_dataset, logger, pretrained_Explainer_path, device, epochs=5)
-    # PE.generate_explanation(test_dataset, device)
-torch.save(PE.explainer.state_dict(), pretrained_Explainer_path)
-print("\n--------------pretrained explainer save successfully!-----------------\n")
+# for dataset in dataset_list:
+#     print(f"dataset is {dataset}, Pretraining...")
+#     classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset)
+#     PE.model = classifier
+#     train(PE, train_dataset, valid_dataset, logger, pretrained_Explainer_path, device, epochs=5)
+# # PE.generate_explanation(test_dataset, device)
+# torch.save(PE.explainer.state_dict(), pretrained_Explainer_path)
+# print("\n--------------pretrained explainer save successfully!-----------------\n")
 
 # TODO: mutiple dataset pretrained without retune...
 PE.explainer.load_state_dict(torch.load(pretrained_Explainer_path, weights_only=True))
 print("\n--------------Pretrained Without Retune...-----------------\n")
 for dataset in dataset_list:
-    classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset)
+    classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset, device=device)
     PE.model = classifier
 
     with torch.no_grad():
@@ -189,8 +127,9 @@ print("--------------Pretrained And Retune...-----------------")
 for dataset in dataset_list:
     PE.explainer.load_state_dict(torch.load(pretrained_Explainer_path, weights_only=True))
     print(f"\ndataset is {dataset},Refining...")
-    classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset)
+    classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset, device=device)
     PE.model = classifier
+
     train_sub_dataset = Subset(train_dataset, range(100))  # 前 100 个
     retune(PE, train_sub_dataset, device, epochs=3)
     # PE.generate_explanation(test_dataset, device)
@@ -251,6 +190,4 @@ print("--------------done!-----------------")
 # Confusion Matrix:
 # [[3405  578]   ->   [TP FN]
 # [ 102   28]]   ->   [FP TN]
-
-
 # ------------------------------------------------------------------------------------------------

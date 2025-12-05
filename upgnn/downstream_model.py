@@ -10,7 +10,7 @@ from sklearn.metrics import confusion_matrix, f1_score, roc_auc_score
 from ogb.graphproppred import Evaluator
 from torch_geometric.data import Data
 from collections import Counter
-# from upsegnn.model import mask_fn_nodemask
+# from upgnn.model import mask_fn_nodemask
 
 criterion = nn.BCEWithLogitsLoss(reduction="none")
 lr = 0.001

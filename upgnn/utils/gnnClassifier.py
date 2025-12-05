@@ -1,7 +1,7 @@
 import torch
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
-from upsegnn.utils.embedding import GNN
-from upsegnn.downstream_model import MLP
+from upgnn.utils.embedding import GNN
+from upgnn.downstream_model import MLP
 class GNNClassifier(torch.nn.Module):
     def __init__(self, num_layer, emb_dim, hidden_dim, num_tasks=2, JK="last", drop_ratio=0.0,
                  graph_pooling="mean", gnn_type="gcn"):

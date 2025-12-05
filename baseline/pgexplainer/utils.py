@@ -1,24 +1,116 @@
 import math
 import warnings
-import torch
 import os
-import random
 import numpy as np
 import torch.nn as nn 
 import torch_geometric as pyg
 import torch_geometric.nn as pygnn 
-
-from torch.nn import Parameter
+from torch.utils.data import Dataset
 from torch import Tensor
-from torch_geometric.nn import MessagePassing
 from typing import Union, Tuple, List, Optional, Callable, Any
 from torch.nn import Parameter
 from torch_geometric.nn import MessagePassing
+import torch
+from os import path as osp
 from torch_geometric.data import Data
+from upgnn.dataset.ba2motif import BA2Motif
+from upgnn.dataset.dd import DD
+from upgnn.dataset.frankenstein import FrankensteinTXT
+from upgnn.dataset.mutag import Mutag
+from upgnn.dataset.mutagenicity import Mutagenicity
+from upgnn.dataset.nci1 import NCI1
+from upgnn.dataset.proteins import PROTEINS
+from upgnn.dataset.synthetic import Synthetic
+from upgnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
+    trainClassifier_dd, trainClassifier_mutag, trainClassifier_mutagenicity, trainClassifier_frankenstein, \
+    trainClassifier_bbbp,trainClassifier_ogb
+
+from ogb.graphproppred import PygGraphPropPredDataset
 
 ##################################################################
 ###################### GNN Helper ################################
 ##################################################################
+
+
+class GraphDataset(Dataset):
+    def __init__(self, data, slices, idx):
+        self.data = data
+        self.slices = slices
+        self.idx = idx
+
+    def __len__(self):
+        return len(self.idx)
+
+    def __getitem__(self, i):
+        g_idx = self.idx[i]
+        # 切片 x
+        x = self.data.x[self.slices['x'][g_idx]:self.slices['x'][g_idx + 1]]
+        # 切片 edge_index
+        edge_index = self.data.edge_index[:, self.slices['edge_index'][g_idx]:self.slices['edge_index'][g_idx + 1]]
+        # 标签
+        y = self.data.y[g_idx].clone()
+        y = y.view(1).long()  # → tensor([1]), dtype=long
+
+        # edge_attr（如果有）
+        edge_attr = None
+        if 'edge_attr' in self.slices:
+            edge_attr = self.data.edge_attr[self.slices['edge_attr'][g_idx]:self.slices['edge_attr'][g_idx + 1]]
+
+        graph = Data(x=x, edge_index=edge_index, y=y, edge_attr=edge_attr)
+        graph.num_nodes = x.size(0)
+        return graph
+
+    @property
+    def num_node_features(self):
+        return self.data.x.shape[1]
+
+    @property
+    def num_classes(self):
+        return int(self.data.y.max().item()) + 1  # 0/1 → 2
+
+
+def map_labels(dataset, old_label, new_label):
+    """
+    将数据集中的指定标签值映射为新的标签值
+
+    参数:
+        dataset: 输入数据集，包含多个data对象
+        old_label: 需要被替换的旧标签值
+        new_label: 替换后的新标签值
+    返回:
+        处理后的新数据集
+    """
+    new_dataset = []
+    for data in dataset:
+        # 创建与原标签同类型的新标签张量
+        replacement = torch.tensor(new_label, dtype=data.y.dtype)
+
+        # 替换指定标签值
+        if data.y.dim() > 1 and data.y.shape[1] == 1:
+            # 对于形状为[N, 1]的标签，替换后压缩为[N]
+            data.y = torch.where(data.y == old_label, replacement, data.y).squeeze()
+        else:
+            # 对于其他形状的标签直接替换
+            data.y = torch.where(data.y == old_label, replacement, data.y).view(-1)
+
+        new_dataset.append(data)
+
+    return new_dataset
+
+
+def squeeze_labels(dataset):
+    new_dataset = []
+    for data in dataset:
+        # 保证 y 是 [N] 形状的 LongTensor
+        y = data.y.long()
+        # 如果全是同一个值 → 压缩为标量 [1]
+        if y.unique().numel() == 1:
+            data.y = y[0].view(1)  # → tensor([1])
+        else:
+            data.y = y  # 保持原样
+        new_dataset.append(data)
+    return new_dataset
+
 
 
 def set_masks(
@@ -230,3 +322,170 @@ def combine_mask(mask: List[Tensor], top_ratio_every_time: List[float]) -> Tenso
         for k, index in enumerate(Gi_pos_edge_idx):
             mask[i - 1][int(index)] = mask[i][k] + diff_every_time
     return mask[0]
+
+def load_data(datatype):
+    if datatype == 'syn':
+        # TODO: Synthetic 创建训练、验证、测试集  y =  ?
+        train_dataset = Synthetic(osp.join("../data/", f'Synthetic/'), mode='train')
+        valid_dataset = Synthetic(osp.join("../data/", f'Synthetic/'), mode='val')
+        test_dataset = Synthetic(osp.join("../data/", f'Synthetic/'), mode='test')
+
+    elif datatype == 'ogb':
+
+        dataset = PygGraphPropPredDataset(name='ogbg-molhiv', root='../data/ogb')
+        # # TODO: mutag 创建训练、验证、测试集   y= 0 1
+        # dataset = torch.load('./../data/ogb/ogb_graph.pt', weights_only=False)
+        train_dataset = torch.load("../data/ogb/train_dataset_balanced.pt", weights_only=False)
+        valid_dataset = torch.load("../data/ogb/valid_dataset_balanced.pt", weights_only=False)
+        # print(f"data size: {len(dataset)}")
+
+        split_idx = dataset.get_idx_split()
+        # train_dataset = dataset[split_idx['train']]
+        # valid_dataset = dataset[split_idx['valid']]
+        test_dataset = dataset[split_idx['test']]
+
+        train_dataset = squeeze_labels(train_dataset)
+        valid_dataset = squeeze_labels(valid_dataset)
+        test_dataset = squeeze_labels(test_dataset)
+
+    elif datatype == 'mutag':
+        # # TODO: mutag 创建训练、验证、测试集   y= -1 1
+        train_dataset = Mutag(root='../data/mutag', split='train')
+        valid_dataset = Mutag(root='../data/mutag', split='val')
+        test_dataset = Mutag(root='../data/mutag', split='test')
+
+        # train_dataset = map_labels(train_dataset, -1, 0)
+        # # print("train_dataset：", train_dataset)
+        # # mutag：eg   Data(x=[17, 7], edge_index=[2, 38], y=1.0, node_label=[17], edge_label=[38], node_type=[17])
+        # valid_dataset = map_labels(valid_dataset, -1, 0)
+        # test_dataset = map_labels(test_dataset, -1, 0)
+
+    elif datatype == 'mutagenicity':
+        # TODO: mutagenicity 创建训练、验证、测试集   y= 0 1
+        train_dataset = Mutagenicity(mode='train')
+        valid_dataset = Mutagenicity(mode='valid')
+        test_dataset = Mutagenicity(mode='test')
+
+    elif datatype == 'proteins':
+        # TODO: proteins 创建训练、验证、测试集   y= 0 1
+        train_dataset = PROTEINS('train')
+        valid_dataset = PROTEINS('valid')
+        test_dataset = PROTEINS('test')
+
+    elif datatype == 'nci1':
+        # TODO: nci1 创建训练、验证、测试集   y= 0 1
+        train_dataset = NCI1('train')
+        valid_dataset = NCI1('valid')
+        test_dataset = NCI1('test')
+
+    elif datatype == 'ba2motif':
+        # TODO: ba2motif 创建训练、验证、测试集   y= 0是环[5,2]  1是房子[6,2]
+        train_dataset = BA2Motif('../data/ba2motif', 'train')
+        valid_dataset = BA2Motif('../data/ba2motif', 'valid')
+        test_dataset = BA2Motif('../data/ba2motif', 'test')
+
+    elif datatype == 'dd':
+        # TODO: dd 创建训练、验证、测试集   y= 1 2
+        train_dataset = DD('train')
+        valid_dataset = DD('valid')
+        test_dataset = DD('test')
+
+        train_dataset = map_labels(train_dataset, 2, 0)
+        # print("train_dataset：", train_dataset)
+        # mutag：eg   Data(x=[17, 7], edge_index=[2, 38], y=1.0, node_label=[17], edge_label=[38], node_type=[17])
+        valid_dataset = map_labels(valid_dataset, 2, 0)
+        test_dataset = map_labels(test_dataset, 2, 0)
+
+    elif datatype == 'frankenstein':
+        # TODO: frankenstein 创建训练、验证、测试集   y= -1 1
+        train_dataset = FrankensteinTXT(root='../data/frankenstein', split='train')
+        valid_dataset = FrankensteinTXT(root='../data/frankenstein', split='valid')
+        test_dataset = FrankensteinTXT(root='../data/frankenstein', split='test')
+
+        train_dataset = map_labels(train_dataset, -1, 0)
+        # print("train_dataset：", train_dataset)
+        # mutag：eg   Data(x=[17, 7], edge_index=[2, 38], y=1.0, node_label=[17], edge_label=[38], node_type=[17])
+        valid_dataset = map_labels(valid_dataset, -1, 0)
+        test_dataset = map_labels(test_dataset, -1, 0)
+
+
+    elif datatype == 'bbbp':
+        # TODO: bbbp 创建训练、验证、测试集   y= 0 1
+        # ------------------- 1. 路径配置 -------------------
+        ROOT = '../data/bbbp'
+        DATA_PT = f'{ROOT}/processed/data.pt'  # 完整合并数据
+        TRAIN_IDX = f'{ROOT}/processed/train_idx.pt'
+        VALID_IDX = f'{ROOT}/processed/valid_idx.pt'
+        TEST_IDX = f'{ROOT}/processed/test_idx.pt'
+
+        # ------------------- 2. 加载 data + slices -------------------
+        data, slices = torch.load(DATA_PT, weights_only=False)
+
+        # ------------------- 3. 加载划分索引 -------------------
+        train_idx = torch.load(TRAIN_IDX, weights_only=False)
+        valid_idx = torch.load(VALID_IDX, weights_only=False)
+        test_idx = torch.load(TEST_IDX, weights_only=False)
+
+        # ------------------- 5. 创建三个子集 -------------------
+        train_dataset = GraphDataset(data, slices, train_idx)
+        valid_dataset = GraphDataset(data, slices, valid_idx)
+        test_dataset = GraphDataset(data, slices, test_idx)
+
+    return train_dataset, valid_dataset, test_dataset
+
+
+def select_func(data_name, device):
+    train_dataset, valid_dataset, test_dataset = load_data(data_name)
+    # dataset_root = '../../upgnn/data/ba2motif'
+    # Classifier_path = './best_gnnclassifier/best_gnn_classifier_' + data_name + '.pt'
+    Classifier_path = '../best_gnnclassifier/best_gnn_classifier_' + data_name + '.pt'
+
+    # # 检查数据集大小
+    print(f"{data_name}_dataset single data:", train_dataset[0])
+    print(f"Train size: {len(train_dataset)}")
+    print(f"Val size: {len(valid_dataset)}")
+    print(f"Test size: {len(test_dataset)}")
+
+    # 检查数据集标签
+    all_labels = [data.y.item() for data in train_dataset]
+    num_classes = len(set(all_labels))
+    print("num_classes:", num_classes)
+    num_tasks = num_classes
+
+    ## In[统一打印]
+    node_in_dim = train_dataset[0].x.shape[1]  # 节点维度
+    print(f'node_dim：{node_in_dim}')
+    edge_in_dim = train_dataset[0].edge_index.shape[1]
+    print(f'edge_dim：{edge_in_dim}')
+
+    if data_name == 'ba2motif':
+        classifier = trainClassifier_ba2motif.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=12,
+                                                            num_tasks=num_tasks).to(device)
+    elif data_name == 'mutag':
+        classifier = trainClassifier_mutag.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
+                                                         num_tasks=num_tasks).to(device)
+    elif data_name == 'nci1':
+        classifier = trainClassifier_nci1.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
+                                                        num_tasks=num_tasks).to(device)
+    elif data_name == 'proteins':
+        classifier = trainClassifier_proteins.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=128,
+                                                            num_tasks=num_tasks).to(device)
+    elif data_name == 'dd':
+        classifier = trainClassifier_dd.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
+                                                      num_tasks=num_tasks).to(device)
+    elif data_name == 'mutagenicity':
+        classifier = trainClassifier_mutagenicity.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
+                                                                num_tasks=num_tasks).to(device)
+    elif data_name == 'ogb':
+        classifier = trainClassifier_ogb.GNNClassifier(num_layer=2, emb_dim=node_in_dim, hidden_dim=32,
+                                                       num_tasks=num_tasks).to(device)
+    elif data_name == 'frankenstein':
+        classifier = trainClassifier_frankenstein.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=300,
+                                                                num_tasks=num_tasks).to(device)
+    elif data_name == 'bbbp':
+        classifier = trainClassifier_bbbp.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=16,
+                                                        num_tasks=num_tasks).to(device)
+
+    classifier.load_state_dict(torch.load(Classifier_path, weights_only=True))  # 加载预训练分类器
+
+    return classifier, train_dataset, valid_dataset, test_dataset

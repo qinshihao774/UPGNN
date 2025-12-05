@@ -5,16 +5,13 @@ import random
 import numpy as np
 import logging
 import torch
-from torch_geometric.loader import DataLoader
-from model import set_seed, generate_explanation, train, Pretrain_Explainer, retune
 from torch.utils.data import Subset
+from model import set_seed, generate_explanation, train, Pretrain_Explainer, retune
 from metrics import evaluate_single_graph, calculate_sparsity, compute_fidelity_minus, compute_fidelity_plus
-
-import trainClassifier_ogb
 from sklearn.metrics import accuracy_score, confusion_matrix
-from upsegnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
+from upgnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
     trainClassifier_dd, trainClassifier_mutag, trainClassifier_mutagenicity, trainClassifier_frankenstein, \
-    trainClassifier_bbbp
+    trainClassifier_bbbp,trainClassifier_ogb
 from utils.datasetutils import load_data
 from datetime import datetime
 
@@ -35,20 +32,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-## In[Settings]
 set_seed(42)
-dataset_list = ['ba2motif', 'bbbp', 'mutag', 'nci1', 'proteins', 'dd', 'mutagenicity', 'ogb', 'frankenstein']
+exclude_data = 'bbbp'
+dataset_list = ['mutag', 'nci1', 'proteins', 'dd', 'mutagenicity', 'ogb', 'frankenstein']
 # dataset_list = ['ogb']
 
 save_path = 'pretrained'
 # train_dataset, valid_dataset, test_dataset = load_data(data_name)
 # Classifier_path = './best_gnnclassifier/best_gnn_classifier_' + data_name + '.pt'
 # pretrained_Explainer_path = './pretrained/trained_explainer_graph_' + data_name + '.pt'
-pretrained_Explainer_path = './pretrained/pretrained_explainer_all.pt'
+pretrained_Explainer_path = './pretrained/pretrained_explainer_exclude_' + exclude_data + '.pt'
 # pretrained_gnn_path = './pretrained/trained_gnnEncoder_graph_' + data_name + '.pt'
 # pretrained_model_path = './pretrained/trained_model_graph_' + data_name + '.pt'
 os.makedirs(save_path, exist_ok=True)  # exist_ok=True 创建目录时，如果目录已经存在，则不报错
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 ## In[Dataset]
@@ -116,14 +113,14 @@ classifier = None
 PE = Pretrain_Explainer(classifier, 5, 256, device, explain_graph=True, loss_type='NCE')  # 初始化解释器
 
 # # TODO: mutiple dataset pretrain...
-# for dataset in dataset_list:
-#     print(f"dataset is {dataset}, Pretraining...")
-#     classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset)
-#     PE.model = classifier
-#     train(PE, train_dataset, valid_dataset, logger, pretrained_Explainer_path, device, epochs=5)
-# # PE.generate_explanation(test_dataset, device)
-# torch.save(PE.explainer.state_dict(), pretrained_Explainer_path)
-# print("\n--------------pretrained explainer save successfully!-----------------\n")
+for dataset in dataset_list:
+    print(f"dataset is {dataset}, Pretraining...")
+    classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset)
+    PE.model = classifier
+    train(PE, train_dataset, valid_dataset, logger, pretrained_Explainer_path, device, epochs=5)
+    # PE.generate_explanation(test_dataset, device)
+torch.save(PE.explainer.state_dict(), pretrained_Explainer_path)
+print("\n--------------pretrained explainer save successfully!-----------------\n")
 
 # TODO: mutiple dataset pretrained without retune...
 PE.explainer.load_state_dict(torch.load(pretrained_Explainer_path, weights_only=True))
@@ -190,7 +187,6 @@ for dataset in dataset_list:
     print(f"\ndataset is {dataset},Refining...")
     classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset)
     PE.model = classifier
-
     train_sub_dataset = Subset(train_dataset, range(100))  # 前 100 个
     retune(PE, train_sub_dataset, device, epochs=3)
     # PE.generate_explanation(test_dataset, device)

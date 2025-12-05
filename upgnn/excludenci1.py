@@ -6,16 +6,12 @@ import numpy as np
 import logging
 import torch
 from torch.utils.data import Subset
-
 from model import set_seed, generate_explanation, train, Pretrain_Explainer, retune
-
 from metrics import evaluate_single_graph, calculate_sparsity, compute_fidelity_minus, compute_fidelity_plus
-
-import trainClassifier_ogb
 from sklearn.metrics import accuracy_score, confusion_matrix
-from upsegnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
+from upgnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
     trainClassifier_dd, trainClassifier_mutag, trainClassifier_mutagenicity, trainClassifier_frankenstein, \
-    trainClassifier_bbbp
+    trainClassifier_bbbp,trainClassifier_ogb
 from utils.datasetutils import load_data
 from datetime import datetime
 
@@ -37,8 +33,8 @@ logging.basicConfig(
 logger = logging.getLogger()
 
 set_seed(42)
-exclude_data = 'ogb'
-dataset_list = ['bbbp', 'mutag', 'nci1', 'proteins', 'dd', 'mutagenicity', 'frankenstein']
+exclude_data = 'nci1'
+dataset_list = ['bbbp', 'mutag', 'proteins', 'dd', 'mutagenicity', 'ogb', 'frankenstein']
 # dataset_list = ['ogb']
 
 save_path = 'pretrained'
@@ -49,7 +45,7 @@ pretrained_Explainer_path = './pretrained/pretrained_explainer_exclude_' + exclu
 # pretrained_gnn_path = './pretrained/trained_gnnEncoder_graph_' + data_name + '.pt'
 # pretrained_model_path = './pretrained/trained_model_graph_' + data_name + '.pt'
 os.makedirs(save_path, exist_ok=True)  # exist_ok=True 创建目录时，如果目录已经存在，则不报错
-device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 ## In[Dataset]
