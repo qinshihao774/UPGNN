@@ -5,6 +5,11 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix, f1_score, roc_auc_score
 
+import matplotlib.pyplot as plt
+import networkx as nx
+from torch_geometric.utils import to_networkx
+
+
 def evaluate_embeddings(model, dataset, device):
     """
     使用逻辑回归评估整个数据集的嵌入，计算 AUC 分数，以衡量编码器性能。
@@ -50,7 +55,8 @@ def evaluate_single_graph(classifier, explainer, data, device):
         embed, node_embed = classifier.gnn(data, isbatch=False)
         edge_mask = explainer.explainer(data=data, node_embed=node_embed)
         # masked_data_minus = explainer.fn_softedgemask(data, edge_mask, isFidelitPlus=False)
-        masked_data_minus = explainer.topk_edge_mask(data, edge_mask, isFidelitPlus=False)
+        # masked_data_minus = explainer.topk_edge_mask(data, edge_mask, rate=0.8, isFidelitPlus=False)
+        masked_data_minus = explainer.hard_subgraph_mask(data, edge_mask, rate=0.8, keep_important=True)
         logists = classifier(masked_data_minus)
         pred_prob = torch.sigmoid(logists).squeeze()  # 转换为概率，形状 [2]
         true_label = data.y.item()
@@ -184,7 +190,8 @@ def compute_fidelity_plus(classifier, explainer, dataset, device: torch.device) 
             edge_mask = explainer.explainer(data=graph, node_embed=node_embed)
             # print(f"Edge mask mean: {edge_mask.mean():.4f}, min: {edge_mask.min():.4f}, max: {edge_mask.max():.4f}")
             # masked_data = explainer.fn_softedgemask(graph, edge_mask, isFidelitPlus=True)  # 非关键结构
-            masked_data = explainer.topk_edge_mask(graph, edge_mask, isFidelitPlus=True)  # 非关键结构
+            # masked_data = explainer.topk_edge_mask(graph, edge_mask, rate=0.5, isFidelitPlus=True)  # 非关键结构
+            masked_data = explainer.hard_subgraph_mask(graph, edge_mask, rate=0.7, keep_important=False)  # 非关键结构
 
             if masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
                 continue  # 跳过空子图
@@ -195,6 +202,7 @@ def compute_fidelity_plus(classifier, explainer, dataset, device: torch.device) 
 
             # 5. 计算 L2 范数：||σ(f(G_i)) - σ(f(G_i \ S_i))||_2
             fidelity_score = torch.norm(pred_orig_prob - pred_masked_prob, p=2).item()
+
             total_fidelity += fidelity_score
             num_graphs += 1
 
@@ -246,7 +254,8 @@ def compute_fidelity_minus(classifier, explainer, dataset, device: torch.device)
             edge_mask = explainer.explainer(data=graph, node_embed=node_embed)
             # print(f"Edge mask mean: {edge_mask.mean():.4f}, min: {edge_mask.min():.4f}, max: {edge_mask.max():.4f}")
             # masked_data = explainer.fn_softedgemask(graph, edge_mask, isFidelitPlus=False)  # 关键结构
-            masked_data = explainer.topk_edge_mask(graph, edge_mask, isFidelitPlus=False)  # 关键结构
+            # masked_data = explainer.topk_edge_mask(graph, edge_mask, rate=0.5, isFidelitPlus=False)  # 关键结构
+            masked_data = explainer.hard_subgraph_mask(graph, edge_mask, rate=0.7, keep_important=True)  # 关键结构
 
             if masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
                 continue
@@ -257,9 +266,100 @@ def compute_fidelity_minus(classifier, explainer, dataset, device: torch.device)
 
             # 5. 计算 L2 范数：||σ(f(G_i)) - σ(f(S_i))||_2（低值表示 S_i 足以代表 G_i）
             fidelity_score = torch.norm(pred_orig_prob - pred_masked_prob, p=2).item()
+
             total_fidelity += fidelity_score
             num_graphs += 1
 
     avg_fidelity_minus = total_fidelity / max(num_graphs, 1)
     # print(f"Average Fidelity-: {avg_fidelity_minus:.4f} ")
     return avg_fidelity_minus
+
+
+def fidelity_plus(model, data, subgraph) -> float:
+    model.eval()
+    with torch.no_grad():
+        orig_out = model(data.x, data.edge_index, data.batch)
+        orig_prob = orig_out.softmax(1)
+        true_label = orig_out.argmax(1).item()
+        p_orig = orig_prob[0, true_label].item()
+
+        # 移除解释子图（重要部分置0）
+        node_idx = subgraph.node_index
+        mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=data.x.device)
+        mask[node_idx] = True
+        x_masked = data.x.clone()
+        x_masked[~mask] = 0
+        edge_mask = mask[data.edge_index[0]] & mask[data.edge_index[1]]
+        edge_index_masked = data.edge_index[:, ~edge_mask]  # 保留非重要边
+
+        batch_masked = data.batch.clone()
+        batch_masked[~mask] = 0
+        out_masked = model(x_masked, edge_index_masked, batch_masked)
+        p_masked = out_masked.softmax(1)[0, true_label].item()
+
+        return p_orig - p_masked  # 下降越多越好
+
+
+def fidelity_minus(model, data, subgraph):
+    model.eval()
+    with torch.no_grad():
+        orig_out = model(data.x, data.edge_index, data.batch)
+        orig_prob = orig_out.softmax(1)
+        true_label = data.y.item()  # 假设 graph-level 标签
+        p_orig = orig_prob[0, true_label].item()
+
+        # 只保留子图
+        node_idx = subgraph.node_index
+        mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=data.x.device)
+        mask[node_idx] = True
+
+        x_sub = data.x.clone()
+        x_sub[~mask] = 0
+        edge_mask = mask[data.edge_index[0]] & mask[data.edge_index[1]]
+        edge_index_sub = data.edge_index[:, edge_mask]
+        batch_padded = torch.zeros(data.num_nodes, dtype=torch.long, device=data.x.device)
+        batch_padded[torch.where(mask)[0]] = data.batch[torch.where(mask)[0]]
+
+        out_sub = model(x_sub, edge_index_sub, batch_padded)
+        p_sub = out_sub.softmax(1)[0, true_label].item() if out_sub.size(0) > 0 else 0.0
+
+        fid_minus = p_orig - p_sub  # 标准差值，低好（接近0）
+        return fid_minus, p_sub
+
+
+# ==================== 4. 可视化函数 ====================
+def visualize_explanation(data, subgraph, fid_plus, fid_minus, sparsity):
+    G_full = to_networkx(data, to_undirected=True)
+    G_sub = to_networkx(subgraph, to_undirected=True)
+
+    plt.figure(figsize=(15, 6))
+
+    # 原图 + 高亮
+    plt.subplot(131)
+    pos = nx.kamada_kawai_layout(G_full)
+    nx.draw(G_full, pos, node_color='lightgray', edge_color='gray', node_size=300, with_labels=False)
+    nx.draw_networkx_nodes(G_full, pos, nodelist=subgraph.node_index.tolist(), node_color='red', node_size=500)
+    nx.draw_networkx_edges(G_full, pos, edgelist=[(a.item(), b.item()) for a, b in subgraph.edge_index.t()],
+                           edge_color='red', width=3)
+    plt.title("Original + Highlighted Subgraph")
+
+    # 纯子图
+    plt.subplot(132)
+    pos_sub = nx.kamada_kawai_layout(G_sub)
+    nx.draw(G_sub, pos_sub, node_color='salmon', node_size=600, edge_color='red', width=3, with_labels=True)
+    plt.title("Explanation Subgraph")
+
+    # 指标柱状图
+    plt.subplot(133)
+    metrics = ['Fidelity+', 'Fidelity-', 'Sparsity']
+    values = [fid_plus, fid_minus, sparsity]
+    colors = ['#ff7f0e', '#2ca02c', '#1f77b4']
+    plt.bar(metrics, values, color=colors, alpha=0.8)
+    plt.ylim(0, 1)
+    plt.title("Explanation Quality Metrics")
+    for i, v in enumerate(values):
+        plt.text(i, v + 0.02, f"{v:.3f}", ha='center', fontsize=12)
+
+    plt.suptitle(f"MUTAG Graph {data.y.item()} | Nodes: {data.num_nodes} → {subgraph.num_nodes}", fontsize=16)
+    plt.tight_layout()
+    plt.show()

@@ -1,4 +1,5 @@
 import torch
+import math
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.utils import add_remaining_self_loops
@@ -26,14 +27,72 @@ class GNNExplainerManual:
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model.to(self.device)
 
-    def topk_edgemask_subgraph(self, data, edge_mask, rate=0.7, isFidelitPlus=False):
-        num_edges = data.edge_index.size(1)
-        k = max(1, int(rate * num_edges))
-        threshold = edge_mask.topk(k).values.min()
-        hard_mask = (edge_mask >= threshold).float()
-        final_mask = hard_mask if not isFidelitPlus else (1 - hard_mask)
+    # def topk_edgemask_subgraph(self, data, edge_mask, rate=0.7, isFidelitPlus=False):
+    #     num_edges = data.edge_index.size(1)
+    #     k = max(1, int(rate * num_edges))
+    #     threshold = edge_mask.topk(k).values.min()
+    #     hard_mask = (edge_mask >= threshold).float()
+    #     final_mask = hard_mask if not isFidelitPlus else (1 - hard_mask)
+    #     masked_data = data.clone()
+    #     masked_data.edge_weight = final_mask
+    #     return masked_data
+
+    def topk_edgemask_subgraph(self, data, edge_mask, ratio=None, k_fixed=None, isFidelitPlus=False) -> Data:
+        """
+        标准 top-k hard mask（论文和 DIG 库都在用这个逻辑）
+        参数:
+            ratio:      float, 保留比例（如 0.2），默认 None
+            k_fixed:    int,   固定保留边数（如 10），有值时优先于 ratio
+            isFidelitPlus: True → 返回补图（F+），False → 返回解释子图（F-）
+        """
+        edge_mask = edge_mask.squeeze()
+        num_edges = edge_mask.size(0)
+
+        # 1. 确定要保留的边数 k
+        if k_fixed is not None:
+            k = min(max(1, k_fixed), num_edges)
+        elif ratio is not None:
+            k = math.ceil(ratio * num_edges)  # 向上取整，保证至少保留这么多
+            k = min(max(1, k), num_edges)
+        else:
+            raise ValueError("ratio 或 k_fixed 必须提供一个")
+
+        # 2. 稳定地取阈值（推荐方式）
+        if k == num_edges:  # 全保留
+            hard_mask = torch.ones(num_edges, dtype=torch.float, device=edge_mask.device)
+        elif k == 1:
+            hard_mask = torch.zeros(num_edges, dtype=torch.float, device=edge_mask.device)
+            hard_mask[edge_mask.argmax()] = 1.0
+        else:
+            # 推荐：用 kthvalue（稳定）而不是 topk
+            threshold = torch.kthvalue(-edge_mask, k).values  # 第 k 大的值（负号取大）
+            hard_mask = (edge_mask >= threshold).float()
+
+            # 关键防病处理：如果因为数值相等导致选多了/少了，强制调整
+            if hard_mask.sum() > k:
+                # 选多了 → 只保留分数最高的那 k 个
+                _, topk_indices = torch.topk(edge_mask, k)
+                hard_mask = torch.zeros_like(hard_mask)
+                hard_mask[topk_indices] = 1.0
+            elif hard_mask.sum() < k:
+                # 选少了 → 补足到 k 个（从剩余最高分的补）
+                remain = edge_mask[hard_mask < 0.5]
+                need = k - hard_mask.sum().long()
+                if len(remain) > 0:
+                    extra = remain.topk(need.item()).indices
+                    hard_mask[extra] = 1.0
+
+        # 3. F+ 需要补图
+        final_mask = hard_mask if not isFidelitPlus else (1.0 - hard_mask)
+
+        # 4. 防空图终极保险（极少触发）
+        if final_mask.sum() == 0:
+            # 至少保留一条最高分的边（F-）或最低分的边（F+）
+            idx = edge_mask.argmax() if not isFidelitPlus else edge_mask.argmin()
+            final_mask[idx] = 1.0
+
         masked_data = data.clone()
-        masked_data.edge_weight = final_mask
+        masked_data.edge_weight = final_mask.unsqueeze(1)  # [E,1] 防止广播问题
         return masked_data
 
     def explain(self, data: Data):
@@ -45,6 +104,8 @@ class GNNExplainerManual:
         num_edges_with_loop = edge_index.size(1)
 
         # 初始化边掩码（可学习）
+        # 用Adam优化器去学习一个最优的edge_mask，使得加了这个掩码后的图，仍然能被GNN正确分类，同时这个掩码要尽量稀疏和确定（不模糊）。
+        # 换句话说：它就是在“扰动”掩码，但不是随机的扰动，而是有目标、有梯度、有方向的智能扰动！
         edge_mask = torch.nn.Parameter(torch.ones(num_edges_with_loop, device=self.device) * 0.5)
 
         optimizer = torch.optim.Adam([edge_mask], lr=self.lr)
@@ -74,7 +135,7 @@ class GNNExplainerManual:
             loss.backward()
             optimizer.step()
 
-            if epoch % 50 == 0:
+            if epoch % 20 == 0:
                 print(f"  Epoch {epoch}, Loss: {loss.item():.4f}")
 
         final_mask = torch.sigmoid(edge_mask)[:data.edge_index.size(1)]  # 去掉自环
@@ -178,7 +239,7 @@ def compute_fidelity_plus(classifier, explainer, dataset, device: torch.device) 
         edge_mask = explainer.explain(graph)
         # edge_mask = torch.clamp(edge_mask, min=0.01, max=0.99)
         # masked_data = fn_softedgemask(graph, edge_mask, isFidelitPlus=True)  # 需实现：用掩码过滤节点/边
-        masked_data = explainer.topk_edgemask_subgraph(graph, edge_mask, isFidelitPlus=True)  # 需实现：用掩码过滤节点/边
+        masked_data = explainer.topk_edgemask_subgraph(graph, edge_mask,ratio=0.5, isFidelitPlus=True)  # 需实现：用掩码过滤节点/边
 
         if masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
             continue  # 跳过空子图
@@ -240,7 +301,7 @@ def compute_fidelity_minus(classifier, explainer, dataset, device: torch.device)
         edge_mask = explainer.explain(graph)
         # edge_mask = torch.clamp(edge_mask, min=0.01, max=0.99)
         # masked_data = fn_softedgemask(graph, edge_mask, isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
-        masked_data = explainer.topk_edgemask_subgraph(graph, edge_mask, isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
+        masked_data = explainer.topk_edgemask_subgraph(graph, edge_mask,ratio=0.5, isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
 
         if masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
             continue
@@ -268,7 +329,7 @@ if __name__ == "__main__":
     dataset_name = 'ogb'
     classifier, train_dataset, valid_dataset, test_dataset = select_func(dataset_name, device)
     # print(f"开始解释 {dataset_name} 数据集...")
-    explainer = GNNExplainerManual(model=classifier, epochs=50, lr=0.01, device=device)
+    explainer = GNNExplainerManual(model=classifier, epochs=20, lr=0.01, device=device)
     # # 测试前10个图是否能解释成功
     # success = 0
     # for i, g in enumerate(test_dataset[:10]):

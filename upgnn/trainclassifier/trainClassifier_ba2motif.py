@@ -454,7 +454,7 @@ def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=100, 
             # print("pred:", pred)
             # print("y:", batch.y)
             # torch.nn.CrossEntropyLoss 期望的输入 input 是 logits（即未经过 softmax 处理的得分）
-            loss = criterion(out, batch.y.squeeze().long())
+            loss = criterion(out, batch.y.squeeze().long()) #所有样本损失的平均值。
             loss.backward()
             optimizer.step()
 

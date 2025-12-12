@@ -1,6 +1,7 @@
 ## In[Import]
 import networkx as nx
 import torch
+import math
 import torch.nn as nn
 import random
 import numpy as np
@@ -42,23 +43,6 @@ class MLP(nn.Module):
         else:
             self.edge_mlp.append(nn.Linear(2 * input_dim, 1))
 
-        # ========== 关键初始化 ==========
-
-    #     self._init_weights()
-    #
-    # def _init_weights(self):
-    #     for layer in self.edge_mlp:
-    #         if isinstance(layer, nn.Linear):
-    #             # Xavier 初始化权重
-    #             nn.init.xavier_uniform_(layer.weight)
-    #             # 最后一层偏置初始化为负值 → logits 初始偏负 → mask 偏稀疏
-    #             if layer.bias is not None:
-    #                 if layer == self.edge_mlp[-1]:  # 最后一层
-    #                     nn.init.constant_(layer.bias, -3.0)  # 强烈建议 -2 ~ -5
-    #                 else:
-    #                     nn.init.constant_(layer.bias, 0.0)
-    #             # 为什么负偏置？初始 logits 负 → sigmoid <0.5 → mask 稀疏，便于训练从“全保留”向“选择性保留”学习。
-
     def forward(self, data, node_embed):
         # node_embed = F.normalize(node_embed, p=2, dim=-1)
         # 边掩码  是否考虑双向边？ 需要根据图的边性质 须考虑有向、无向边的信息传递
@@ -82,7 +66,7 @@ class MLP(nn.Module):
 
 class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
     def __init__(self, model, num_layer, hidden_dim: int, device, explain_graph: bool = True, coff_size: float = 0.01,
-                 coff_ent: float = 5e-4, loss_type='NCE', t0: float = 5.0, t1: float = 1.0):
+                 coff_ent: float = 0.002, loss_type='NCE', t0: float = 5.0, t1: float = 1.0):
         super(Pretrain_Explainer, self).__init__()
         self.device = device
         self.explain_graph = explain_graph  # bool
@@ -151,27 +135,12 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
         # 确保edge_mask只有横向一维 默认压缩存在1的维度
         edge_mask = edge_mask.squeeze()
 
-        # F+ 子图：移除高重要性边 非重要结构子图
-        # masked_data_plus = fn_softedgemask(data, edge_mask, isFidelitPlus=True)
-
         # F- 子图：保留高重要性边 重要结构子图
-        masked_data_minus = fn_softedgemask(data, edge_mask, isFidelitPlus=False)
+        masked_data_minus = self.fn_softedgemask(data, edge_mask, isFidelitPlus=False)
         # masked_data_minus = self.topk_edge_mask(data, edge_mask, isFidelitPlus=False)
-
-        # if masked_data_plus.num_nodes == 0 or masked_data_plus.edge_index.size(1) == 0 or \
-        #         masked_data_minus.num_nodes == 0 or masked_data_minus.edge_index.size(1) == 0:
-        #     print("警告 masked_data_plus / masked_data_minus error !")
-        #     return torch.tensor(0.0, device=device, requires_grad=True)
-
         if masked_data_minus.num_nodes == 0 or masked_data_minus.edge_index.size(1) == 0:
             print("警告 masked_data_minus error !")
             return torch.tensor(0.0, device=device, requires_grad=True)
-
-        # with torch.no_grad():
-        #     masked_pred_plus = self.model(masked_data_plus)
-        # F+ 用 1-CE
-        # loss_fidelity_plus = F.cross_entropy(masked_pred_plus, pred_y)
-        # pos_embed, _ = self.model.gnn(masked_data_minus, isbatch=False)
 
         with torch.no_grad():
             masked_pred_minus = self.model(masked_data_minus)
@@ -193,7 +162,7 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
         #   loss_infonce：InfoNCE 损失非负，目标是接近 0（正样本与原始图相似，负样本远离）。
         #   loss_reg 和 loss_ent：非负，鼓励 edge_mask 稀疏化。
         #       影响损失关键                  最大可能互信息                 子图规不规范的关键
-        # loss = 0.4 * loss_infonce + 0.3 * loss_fidelity_minus + 0.2 * (loss_reg + loss_ent)
+        # loss = 0.4 * loss_infonce + 0.4 * loss_fidelity_minus + 0.2 * (loss_reg + loss_ent)
         loss = 0.8 * loss_infonce + 0.2 * (loss_reg + loss_ent)
 
         # 返回拆分
@@ -232,7 +201,8 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
         # F+ 子图：移除高重要性边 非重要结构子图
         # masked_data_plus = fn_softedgemask(data, edge_mask, isFidelitPlus=True)
         # F- 子图：保留高重要性边 重要结构子图
-        masked_data_minus = fn_softedgemask(data, edge_mask, isFidelitPlus=False)  # 边权重最小0.01 最大0.99
+        masked_data_minus = self.fn_softedgemask(data, edge_mask, isFidelitPlus=False)  # 边权重最小0.01 最大0.99
+        # masked_data_minus = self.hard_subgraph_mask(data, edge_mask, keep_important=True)
         # masked_data_minus = topk_edge_mask(data, edge_mask, isFidelitPlus=False) # 边权重最小0.0 最大1.0
 
         with torch.no_grad():
@@ -303,61 +273,7 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
 
         return loss
 
-    # def generate_negative_subgraphs(self, data, num_negatives=3, edge_drop_ratio=0.7, feature_noise=0.1):
-    # 
-    #     """
-    #     生成负样本子图，通过边删除和特征扰动增加区分度。
-    #     要求：1、且负样本也不能完全丢失太多边，不然也会丢失太多信息，导致负样本没有任何参考性，导致模型学坏
-    #          2、节点扰动也不能太大，与边丢弃同理
-    #     Args:
-    #         data: PyG Data 对象
-    #         num_negatives: 负样本数量
-    #         edge_drop_ratio: 边删除比例
-    #         feature_noise: 特征扰动标准差
-    #     Returns:
-    #         neg_subgraphs: 负样本子图列表
-    #     """
-    #     neg_subgraphs = []
-    #     num_edges = data.edge_index.size(1)
-    #     device = data.x.device
-    # 
-    #     for _ in range(num_negatives):
-    #         # 随机删除边（更强扰动）
-    #         keep_ratio = 1 - edge_drop_ratio
-    #         # 执行伯努利随机采样
-    #         neg_mask = torch.bernoulli(torch.ones(num_edges, device=device) * keep_ratio).bool()
-    #         neg_edge_index = data.edge_index[:, neg_mask]
-    # 
-    #         # 获取保留边的节点
-    #         active_nodes = torch.unique(neg_edge_index)  # 获取仍与边相连的节点索
-    # 
-    #         # 特征扰动 没有移除节点
-    #         # neg_x = data.x.float() + torch.randn_like(data.x.float()) * feature_noise
-    #         # neg_x = torch.clamp(neg_x, min=-1.0, max=1.0)  # 防止数值溢出
-    # 
-    #         # 特征扰动，仅保留活跃节点的特征
-    #         neg_x = data.x.float()[active_nodes] + torch.randn_like(data.x.float()[active_nodes]) * feature_noise
-    #         neg_x = torch.clamp(neg_x, min=-1.0, max=1.0)  # 防止数值溢出
-    # 
-    #         # # 重新映射边索引以匹配新的节点索引
-    #         node_mapping = {old_idx.item(): new_idx for new_idx, old_idx in enumerate(active_nodes)}
-    #         neg_edge_index = torch.tensor(
-    #             [[node_mapping[idx.item()] for idx in neg_edge_index[0]],
-    #              [node_mapping[idx.item()] for idx in neg_edge_index[1]]],
-    #             device=device, dtype=torch.long
-    #         )
-    # 
-    #         neg_data = Data(
-    #             x=neg_x,
-    #             edge_index=neg_edge_index,
-    #             num_nodes=neg_x.size(0)
-    #         ).to(device)
-    # 
-    #         neg_subgraphs.append(neg_data)
-    # 
-    #     return neg_subgraphs
-
-    def generate_negative_subgraphs(self, data, num_negatives=3, edge_drop_ratio=0.7, feature_noise=0.1):
+    def generate_negative_subgraphs(self, data, num_negatives=3, edge_drop_ratio=0.8, feature_noise=0.3):
 
         """
         生成负样本子图，通过边删除和特征扰动增加区分度。
@@ -549,106 +465,72 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
 
         return masked_data
 
-    def topk_edge_mask(self, data, edge_mask, rate=0.5, isFidelitPlus=False) -> Data:
+    # def topk_edge_mask(self, data, edge_mask, rate=0.5, isFidelitPlus=False) -> Data:
+    #     num_edges = data.edge_index.size(1)
+    #
+    #     # 1. 计算 hard_mask（0/1）
+    #     k = max(1, int(rate * num_edges))
+    #     threshold = edge_mask.topk(k).values.min()  # 取前topk比例的阈值
+    #     hard_mask = (edge_mask >= threshold).float()  # [E] → 0.0 or 1.0
+    #
+    #     # 2. 关键：子图用 hard_mask 关键，补图用 1 - hard_mask 非关键
+    #     final_mask = hard_mask if not isFidelitPlus else (1 - hard_mask)
+    #
+    #     # 3. 克隆 + 应用
+    #     masked_data = data.clone()
+    #     masked_data.edge_weight = final_mask  # [E]，自动广播
+    #     return masked_data
+
+    def hard_subgraph_mask(self, data, edge_mask, rate=0.5, keep_important=True):
+        """
+        标准硬删除方式（2025年顶会通用）
+        keep_important=True  → 保留重要边（用于 Fidelity⁻）
+        keep_important=False → 保留非重要边（用于 Fidelity⁺）
+        """
         num_edges = data.edge_index.size(1)
-
-        # 1. 计算 hard_mask（0/1）
         k = max(1, int(rate * num_edges))
-        threshold = edge_mask.topk(k).values.min()  # 取前topk比例的阈值
-        hard_mask = (edge_mask >= threshold).float()  # [E] → 0.0 or 1.0
+        threshold = edge_mask.topk(k).values.min()
+        hard_edge_mask = (edge_mask >= threshold)  # [E] bool
 
-        # 2. 关键：子图用 hard_mask 关键，补图用 1 - hard_mask 非关键
-        final_mask = hard_mask if not isFidelitPlus else (1 - hard_mask)
+        if not keep_important:
+            hard_edge_mask = ~hard_edge_mask  # Fidelity⁺ 用补集
 
-        # 3. 克隆 + 应用
-        masked_data = data.clone()
-        masked_data.edge_weight = final_mask  # [E]，自动广播
-        return masked_data
+        # 1. 选出要保留的边
+        selected_edges = hard_edge_mask
+        edge_index_new = data.edge_index[:, selected_edges]
 
-    def __edge_mask_to_node__(self, data, edge_mask, top_k):  # 利用边掩码做节点掩码
-        threshold = float(edge_mask.reshape(-1).sort(descending=True).values[min(top_k, edge_mask.shape[0] - 1)])
-        hard_mask = (edge_mask > threshold).cpu()
-        edge_idx_list = torch.where(hard_mask == 1)[0]
+        # 2. 找出这些边连接的节点（自动去重）
+        src = edge_index_new[0]
+        dst = edge_index_new[1]
+        nodes_to_keep = torch.unique(torch.cat([src, dst]))
 
-        selected_nodes = []
-        edge_index = data.edge_index.cpu().numpy()
-        for edge_idx in edge_idx_list:
-            selected_nodes += [edge_index[0][edge_idx], edge_index[1][edge_idx]]
-        selected_nodes = list(set(selected_nodes))
-        maskout_nodes = [node for node in range(data.x.shape[0]) if node not in selected_nodes]
+        if nodes_to_keep.numel() == 0:
+            # 返回一个空图（防止 crash）
+            empty_data = data.clone()
+            empty_data.edge_index = torch.empty((2, 0), dtype=torch.long, device=data.x.device)
+            empty_data.x = torch.empty((0, data.x.size(1)), device=data.x.device)
+            return empty_data
 
-        node_mask = torch.zeros(data.num_nodes).type(torch.float32).to(self.device)
-        node_mask[maskout_nodes] = 1.0
-        return node_mask
+        # 3. 构建新图：只保留这些节点和边
+        new_data = data.clone()
 
-    # def forward(self, data: Data, mlp_explainer: nn.Module, **kwargs):
-    #     """ explain the GNN behavior for graph and calculate the metric values.
-    #     The interface for the :class:`dig.evaluation.XCollector`.
-    #
-    #     Args:
-    #         x (:obj:`torch.Tensor`): Node feature matrix with shape
-    #           :obj:`[num_nodes, dim_node_feature]`
-    #         edge_index (:obj:`torch.Tensor`): Graph connectivity in COO format
-    #           with shape :obj:`[2, num_edges]`
-    #         kwargs(:obj:`Dict`):
-    #           The additional parameters
-    #             - top_k (:obj:`int`): The number of edges in the final explanation results
-    #             - y (:obj:`torch.Tensor`): The ground-truth labels
-    #
-    #     :rtype: (:obj:`None`, List[torch.Tensor], List[Dict])
-    #     """
-    #     top_k = kwargs.get('top_k') if kwargs.get('top_k') is not None else 10
-    #     node_idx = kwargs.get('node_idx')
-    #     # cond_vec = kwargs.get('cond_vec')
-    #
-    #     self.model.eval()
-    #     mlp_explainer = mlp_explainer.to(self.device).eval()
-    #     data = data.to(self.device)
-    #
-    #     self.__clear_masks__()
-    #     if node_idx is not None:
-    #         _, node_embed = self.model(data, isbatch=True)
-    #         embed = node_embed[node_idx:node_idx + 1]
-    #     elif self.explain_graph:
-    #         embed, node_embed = self.embed_model(data, emb=True)
-    #     else:
-    #         assert node_idx is not None, "please input the node_idx"
-    #
-    #     probs = mlp_explainer(embed, mode='pred')
-    #     # node_mask, edge_mask = mlp_explainer(embed, mode='explain')  # if cond_vec is None else cond_vec
-    #     probs = probs.squeeze()
-    #
-    #     if self.explain_graph:  # 图
-    #         subgraph = None
-    #         target_class = torch.argmax(probs) if data.y is None else max(data.y.long(),
-    #                                                                       0)  # sometimes labels are +1/-1
-    #         # _, _, edge_mask, log = self.explain(data, embed=node_embed, training=False)
-    #         node_mask, edge_mask = mlp_explainer(embed, mode='explain')  # if cond_vec is None else cond_vec
-    #         # node_mask = self.__edge_mask_to_node__(data, edge_mask, top_k)  # 设置子图节点掩码
-    #         masked_data = mask_fn_nodemask(data, node_mask)  # 利用掩码构建子图
-    #         masked_embed = self.embed_model(masked_data)  # 构建子图表示
-    #         masked_prob = mlp_explainer(masked_embed, mode='pred')  # 预测的结果概率
-    #         masked_prob = masked_prob[:, target_class]  # 从子图的预测概率分布 masked_prob 中，提取出与目标类别 target_class 对应的概率值。
-    #         sparsity_score = sum(node_mask) / data.num_nodes  # 稀疏度
-    #     else:  # 节点
-    #         target_class = torch.argmax(probs) if data.y is None else max(data.y[node_idx].long(),
-    #                                                                       0)  # sometimes labels are +1/-1
-    #         subgraph, subset = self.get_subgraph(node_idx=node_idx, data=data)
-    #         new_node_idx = torch.where(subset == node_idx)[0]
-    #         _, edge_mask, log = self.explain(subgraph, node_embed[subset], training=False, node_idx=new_node_idx)
-    #         node_mask = self.__edge_mask_to_node__(subgraph, edge_mask, top_k)
-    #         masked_embed = self.model(mask_fn_nodemask(subgraph, node_mask))
-    #         masked_prob = mlp_explainer(masked_embed, mode='pred')[new_node_idx, target_class.long()]
-    #         sparsity_score = sum(node_mask) / subgraph.num_nodes
-    #
-    #     # return variables
-    #     pred_mask = edge_mask.cpu()
-    #
-    #     related_preds = [{
-    #         'maskout': masked_prob.item(),  # 子图预测概率
-    #         'origin': probs[target_class].item(),  # 原始类别的概率
-    #         'sparsity': sparsity_score}]  # 稀疏度
-    #     return subgraph, pred_mask, related_preds
+        # 重映射节点索引（可选，但推荐，防止索引错乱）
+        node_map = torch.zeros(data.num_nodes, dtype=torch.long, device=data.x.device)
+        node_map[nodes_to_keep] = torch.arange(nodes_to_keep.size(0), device=data.x.device)
+
+        new_data.x = data.x[nodes_to_keep]
+        new_data.edge_index = node_map[edge_index_new]
+        if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+            new_data.edge_attr = data.edge_attr[selected_edges]
+        if hasattr(data, 'y'):
+            new_data.y = data.y
+        if hasattr(data, 'batch') and data.batch is not None:
+            new_data.batch = data.batch[nodes_to_keep]
+        else:
+            new_data.batch = torch.zeros(nodes_to_keep.size(0), dtype=torch.long, device=data.x.device)
+
+        new_data.num_nodes = nodes_to_keep.size(0)
+        return new_data
 
 
 def generate_negative_subgraph(data, num_negatives=2, edge_drop_ratio=0.6, feature_noise=0.1) -> {Data}:
@@ -705,41 +587,6 @@ def generate_negative_subgraph(data, num_negatives=2, edge_drop_ratio=0.6, featu
 
     return neg_subgraphs
 
-
-# def generate_negative_subgraph(data, num_negatives=3, edge_drop_ratio=0.3, feature_noise=0.1):
-#     """
-#     生成负样本子图，通过边删除和特征扰动增加区分度。
-#     Args:
-#         data: PyG Data 对象
-#         num_negatives: 负样本数量
-#         edge_drop_ratio: 边删除比例
-#         feature_noise: 特征扰动标准差
-#     Returns:
-#         neg_subgraphs: 负样本子图列表
-#     """
-#     neg_subgraphs = []
-#     num_edges = data.edge_index.size(1)
-#     device = data.x.device
-#
-#     for _ in range(num_negatives):
-#         # 随机删除边（更强扰动）
-#         keep_ratio = 1 - edge_drop_ratio
-#         neg_mask = torch.bernoulli(torch.ones(num_edges, device=device) * keep_ratio).bool()
-#         neg_edge_index = data.edge_index[:, neg_mask]
-#
-#         # 特征扰动
-#         neg_x = data.x.float() + torch.randn_like(data.x.float()) * feature_noise
-#         neg_x = torch.clamp(neg_x, min=-1.0, max=1.0)  # 防止数值溢出
-#
-#         neg_data = Data(
-#             x=neg_x,
-#             edge_index=neg_edge_index,
-#             batch=data.batch
-#         ).to(device)
-#
-#         neg_subgraphs.append(neg_data)
-#
-#     return neg_subgraphs
 
 def explainer_loss(classifier, explainer, data, y, tmp, device):
     # /**
@@ -1170,177 +1017,3 @@ def fn_softedgemask(data, edge_mask, isFidelitPlus=True):
     #     batch=data.batch
     # )
     return masked_data
-
-
-def topk_edge_mask(data, edge_mask, rate=0.25, isFidelitPlus=False) -> Data:
-    num_edges = data.edge_index.size(1)
-
-    # 1. 计算 hard_mask（0/1）
-    k = max(1, int(rate * num_edges))
-    threshold = edge_mask.topk(k).values.min()  # 取前topk比例的阈值
-    hard_mask = (edge_mask >= threshold).float()  # [E] → 0.0 or 1.0
-
-    # 2. 关键：子图用 hard_mask 关键，补图用 1 - hard_mask 非关键
-    final_mask = hard_mask if not isFidelitPlus else (1 - hard_mask)
-
-    print(f"TopK: {k} edges, threshold: {threshold:.4f}")
-
-    # 3. 克隆 + 应用
-    masked_data = data.clone()
-    masked_data.edge_weight = final_mask  # [E]，自动广播
-    return masked_data
-
-
-# def mask_fn_nodemask(data: Data, node_mask: torch.Tensor, isFidelitPlus=False) -> Data:
-#     """
-#     Subgraph building by selecting nodes from the original graph using node_mask.
-#     All operations are performed on GPU.
-#
-#     Args:
-#         data: torch_geometric.data.Data object (on cuda:0)
-#         node_mask: torch.Tensor of shape [num_nodes], importance scores in [0, 1] (on cuda:0)
-#         isFidelitPlus: bool, if True, remove high-score nodes (Fidelity+); else, keep high-score nodes (Fidelity-)
-#
-#     Returns:
-#         subgraph: Data object representing the subgraph (on cuda:0)
-#     """
-#
-#     g = data.clone()
-#     # 确保输入在同一设备
-#     assert node_mask.device == data.x.device, "node_mask and data must be on the same device"
-#
-#     # 动态设置移除/保留节点比例
-#     max_remove_ratio = 0.3
-#     min_keep_nodes = max(2, int(g.num_nodes * 0.5))
-#     k = min(max(1, int(g.num_nodes * max_remove_ratio)), g.num_nodes - min_keep_nodes)
-#
-#     # 计算阈值（Top-K 高分节点的最低得分）
-#     if k > 0:
-#         threshold = torch.topk(node_mask, k, largest=True).values.min()
-#     else:
-#         threshold = node_mask.max() if isFidelitPlus else node_mask.min()
-#
-#     # 生成布尔掩码
-#     node_mask_bool = node_mask < threshold if isFidelitPlus else node_mask >= threshold
-#
-#     # # 选择子图的节点
-#     # node_idx = torch.where(node_mask_bool)[0]  # 选中的节点索引
-#     # if node_idx.size(0) == 0:
-#     #     # 如果子图为空，保留一个随机节点以避免空子图
-#     #     node_idx = torch.tensor([torch.randint(0, g.num_nodes, (1,))], device=g.x.device)
-#     #     print("Warning: 子图为空，保留一个随机节点")
-#
-#     node_idx = torch.where(node_mask_bool)[0]  # 选中的节点索引
-#     if node_idx.size(0) == 0:
-#         # 如果子图为空，取 node_mask 最小的 5 个节点
-#         _, node_idx = torch.topk(node_mask, 5, largest=False)
-#         print("Warning: 子图为空，取 node_mask 最小的 5 个节点")
-#
-#     # 提取子图的节点特征
-#     ret_x = g.x[node_idx]
-#
-#     # 计算 edge_mask：边的两端节点都必须选中
-#     row, col = g.edge_index
-#     edge_mask = node_mask_bool[row] & node_mask_bool[col]
-#
-#     # 过滤边
-#     ret_edge_index = g.edge_index[:, edge_mask]
-#     ret_edge_attr = None if g.edge_attr is None else g.edge_attr[edge_mask]
-#     # 提取子图的边标签
-#     ret_edge_label = getattr(g, 'edge_label', None)  # 安全获取 ret_edge_label
-#     # 老方法 不安全
-#     # ret_edge_label = None if g.edge_label is None else g.edge_label[edge_mask]
-#
-#     # 重新编号边索引
-#     node_map = torch.full((g.num_nodes,), -1, dtype=torch.long, device=g.x.device)
-#     node_map[node_idx] = torch.arange(node_idx.size(0), device=g.x.device)
-#     ret_edge_index = node_map[ret_edge_index]
-#
-#     # 处理 batch
-#     ret_batch = g.batch[node_idx] if hasattr(g, 'batch') and g.batch is not None else None
-#
-#     # 复制原始图的标签（y）
-#     # ret_y = g.y.clone() if hasattr(g, 'y') and g.y is not None else None
-#
-#     # 创建子图
-#     subgraph = Data(
-#         x=ret_x,
-#         edge_index=ret_edge_index,
-#         edge_attr=ret_edge_attr,
-#         edge_label=ret_edge_label,
-#         batch=ret_batch,
-#         # y=ret_y,
-#         # num_nodes=node_idx.size(0)
-#     )
-#     return subgraph
-
-
-def mask_fn_edgemask(data: Data, hard_edge_mask: torch.Tensor, isFidelitPlus: bool) -> Data:
-    """
-    Subgraph building by selecting edges from the original graph using hard_edge_mask.
-    All operations are performed on GPU.
-
-    Args:
-        data: torch_geometric.data.Data object (on cuda:0)
-        hard_edge_mask: torch.Tensor of shape [num_edges], binary values (0 or 1) (on cuda:0)
-        isFidelitPlus: bool, if True, remove edges with mask=1 (Fidelity+); else, keep edges with mask=1 (Fidelity-)
-
-    Returns:
-        subgraph: Data object representing the subgraph (on cuda:0)
-    """
-    g = data.clone()
-    # print(hard_edge_mask)
-    # 确保输入在同一设备
-    assert hard_edge_mask.device == data.x.device, "hard_edge_mask and data must be on the same device"
-    # 方法1：调整 hard_edge_mask 大小以匹配边数
-    if hard_edge_mask.size(0) != g.num_edges:
-        # 调整到正确的大小
-        hard_edge_mask = hard_edge_mask[:g.num_edges] if hard_edge_mask.size(0) > g.num_edges else F.pad(
-            hard_edge_mask, (0, g.num_edges - hard_edge_mask.size(0)))
-    assert hard_edge_mask.size(0) == g.num_edges, "hard_edge_mask size must match number of edges"
-
-    # 生成布尔边掩码
-    if isFidelitPlus:
-        edge_mask_bool = hard_edge_mask == 0  # F+: 保留 mask=0 的边，移除 mask=1 的边 （0为true）
-    else:
-        edge_mask_bool = hard_edge_mask == 1  # F-: 保留 mask=1 的边，移除 mask=0 的边 （1为true）
-
-    # 选择子图的边
-    ret_edge_index = g.edge_index[:, edge_mask_bool]  # 过滤边
-
-    node_idx = torch.unique(ret_edge_index)  # 选中的边涉及的节点
-    if ret_edge_index.size(1) == 0 or node_idx.size(0) == 0:
-        # 如果没有边被选中，返回空子图
-        # print("Warning: 无效空子图")
-        return Data(
-            x=torch.empty((0, g.x.size(1)), dtype=g.x.dtype, device=g.x.device),
-            edge_index=torch.empty((2, 0), dtype=torch.long, device=g.x.device),
-            edge_attr=None,
-            edge_label=None,
-            batch=None
-        )
-
-    # 提取子图的节点特征
-    ret_x = g.x[node_idx]
-
-    # 提取子图的边属性和边标签
-    ret_edge_attr = None if g.edge_attr is None else g.edge_attr[edge_mask_bool]
-    ret_edge_label = None if not hasattr(g, 'edge_label') else g.edge_label[edge_mask_bool]
-
-    # 重新编号边索引
-    node_map = torch.full((g.num_nodes,), -1, dtype=torch.long, device=g.x.device)
-    node_map[node_idx] = torch.arange(node_idx.size(0), device=g.x.device)
-    ret_edge_index = node_map[ret_edge_index]
-
-    # 处理 batch（如果存在）
-    ret_batch = g.batch[node_idx] if hasattr(g, 'batch') and g.batch is not None else None
-
-    # 创建子图
-    subgraph = Data(
-        x=ret_x,
-        edge_index=ret_edge_index,
-        edge_attr=ret_edge_attr,
-        edge_label=ret_edge_label,
-        batch=ret_batch,
-    )
-    return subgraph

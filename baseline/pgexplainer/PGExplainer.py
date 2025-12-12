@@ -1,5 +1,6 @@
 import os
 import torch
+import math
 import torch.nn as nn
 import torch.nn.functional as F
 import os.path as osp
@@ -12,10 +13,12 @@ from torch_scatter import scatter
 from torch_geometric.data import Data
 from torch_geometric.nn import Linear
 from torch_geometric.utils import k_hop_subgraph
-from upgnn.model import fn_softedgemask
+# from upgnn.model import fn_softedgemask
 from base import InstanceExplainAlgorithm
 from utils import set_masks, clear_masks, select_func
 from torch.nn.parameter import UninitializedParameter
+
+
 # from dig.xgraph.evaluation import XCollector
 # from dig.xgraph.evaluation.metrics import fidelity_plus, fidelity_minus
 
@@ -202,21 +205,72 @@ class PGExplainer(InstanceExplainAlgorithm):
 
         return loss_dict
 
-    def topk_edge_mask_subgraph(self, data, edge_mask, rate=0.7, isFidelitPlus=False) -> Data:
+    # def topk_edge_mask_subgraph(self, data, edge_mask, rate=0.7, isFidelitPlus=False) -> Data:
+    #     num_edges = data.edge_index.size(1)
+    #
+    #     # 1. 计算 hard_mask（0/1）
+    #     k = max(1, int(rate * num_edges))
+    #     threshold = edge_mask.topk(k).values.min()  # 取前topk比例的阈值
+    #     hard_mask = (edge_mask >= threshold).float()  # [E] → 0.0 or 1.0
+    #
+    #     # 2. 关键：子图用 hard_mask 关键，补图用 1 - hard_mask 非关键
+    #     final_mask = hard_mask if not isFidelitPlus else (1 - hard_mask)
+    #
+    #     # 3. 克隆 + 应用
+    #     masked_data = data.clone()
+    #     masked_data.edge_weight = final_mask  # [E]，自动广播
+    #     return masked_data
+
+    def hard_subgraph_mask(self, data, edge_mask, rate=0.5, keep_important=True):
+        """
+        标准硬删除方式（2025年顶会通用）
+        keep_important=True  → 保留重要边（用于 Fidelity⁻）
+        keep_important=False → 保留非重要边（用于 Fidelity⁺）
+        """
         num_edges = data.edge_index.size(1)
-
-        # 1. 计算 hard_mask（0/1）
         k = max(1, int(rate * num_edges))
-        threshold = edge_mask.topk(k).values.min()  # 取前topk比例的阈值
-        hard_mask = (edge_mask >= threshold).float()  # [E] → 0.0 or 1.0
+        threshold = edge_mask.topk(k).values.min()
+        hard_edge_mask = (edge_mask >= threshold)  # [E] bool
 
-        # 2. 关键：子图用 hard_mask 关键，补图用 1 - hard_mask 非关键
-        final_mask = hard_mask if not isFidelitPlus else (1 - hard_mask)
+        if not keep_important:
+            hard_edge_mask = ~hard_edge_mask  # Fidelity⁺ 用补集
 
-        # 3. 克隆 + 应用
-        masked_data = data.clone()
-        masked_data.edge_weight = final_mask  # [E]，自动广播
-        return masked_data
+        # 1. 选出要保留的边
+        selected_edges = hard_edge_mask
+        edge_index_new = data.edge_index[:, selected_edges]
+
+        # 2. 找出这些边连接的节点（自动去重）
+        src = edge_index_new[0]
+        dst = edge_index_new[1]
+        nodes_to_keep = torch.unique(torch.cat([src, dst]))
+
+        if nodes_to_keep.numel() == 0:
+            # 返回一个空图（防止 crash）
+            empty_data = data.clone()
+            empty_data.edge_index = torch.empty((2, 0), dtype=torch.long, device=data.x.device)
+            empty_data.x = torch.empty((0, data.x.size(1)), device=data.x.device)
+            return empty_data
+
+        # 3. 构建新图：只保留这些节点和边
+        new_data = data.clone()
+
+        # 重映射节点索引（可选，但推荐，防止索引错乱）
+        node_map = torch.zeros(data.num_nodes, dtype=torch.long, device=data.x.device)
+        node_map[nodes_to_keep] = torch.arange(nodes_to_keep.size(0), device=data.x.device)
+
+        new_data.x = data.x[nodes_to_keep]
+        new_data.edge_index = node_map[edge_index_new]
+        if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+            new_data.edge_attr = data.edge_attr[selected_edges]
+        if hasattr(data, 'y'):
+            new_data.y = data.y
+        if hasattr(data, 'batch') and data.batch is not None:
+            new_data.batch = data.batch[nodes_to_keep]
+        else:
+            new_data.batch = torch.zeros(nodes_to_keep.size(0), dtype=torch.long, device=data.x.device)
+
+        new_data.num_nodes = nodes_to_keep.size(0)
+        return new_data
 
     @property
     def name(self):
@@ -333,7 +387,8 @@ def compute_fidelity_plus(classifier, explainer, dataset, device: torch.device) 
             edge_mask = explainer(graph)
             # edge_mask = torch.clamp(edge_mask, min=0.01, max=0.99)
             # masked_data = fn_softedgemask(graph, edge_mask, isFidelitPlus=True)  # 需实现：用掩码过滤节点/边
-            masked_data = explainer.topk_edge_mask_subgraph(graph, edge_mask, isFidelitPlus=True)  # 需实现：用掩码过滤节点/边
+            # masked_data = explainer.topk_edge_mask_subgraph(graph, edge_mask, rate=0.5,isFidelitPlus=True)  # 需实现：用掩码过滤节点/边
+            masked_data = explainer.hard_subgraph_mask(graph, edge_mask, rate=0.7, keep_important=False)  # 需实现：用掩码过滤节点/边
 
             if masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
                 continue  # 跳过空子图
@@ -394,7 +449,8 @@ def compute_fidelity_minus(classifier, explainer, dataset, device: torch.device)
             edge_mask = explainer(graph)
             # edge_mask = torch.clamp(edge_mask, min=0.01, max=0.99)
             # masked_data = fn_softedgemask(graph, edge_mask, isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
-            masked_data = explainer.topk_edge_mask_subgraph(graph, edge_mask, isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
+            # masked_data = explainer.topk_edge_mask_subgraph(graph, edge_mask, rate=0.5,isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
+            masked_data = explainer.hard_subgraph_mask(graph, edge_mask, rate=0.7, keep_important=True)  # 需实现：用掩码过滤节点/边
 
             if masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
                 continue
@@ -423,7 +479,8 @@ def evaluate_single_graph(classifier, explainer, data, device):
         edge_mask = explainer(data)
         # edge_mask = torch.clamp(edge_mask, min=0.01, max=0.99)
         # masked_data_minus = fn_softedgemask(data, edge_mask, isFidelitPlus=False)
-        masked_data = explainer.topk_edge_mask_subgraph(data, edge_mask, isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
+        # masked_data = explainer.topk_edge_mask_subgraph(data, edge_mask, rate=0.5,isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
+        masked_data = explainer.hard_subgraph_mask(data, edge_mask, rate=0.7,keep_important=True)  # 需实现：用掩码过滤节点/边  # 需实现：用掩码过滤节点/边
 
         logists = classifier(masked_data)
         pred_prob = torch.sigmoid(logists).squeeze()  # 转换为概率，形状 [2]
@@ -454,34 +511,34 @@ if __name__ == "__main__":
     print(f"Number of classes: {num_classes}")
 
     explainer = PGExplainer(classifier, device, epochs=10, gnn_task='graph')
-    optimizer = torch.optim.Adam(explainer.explainer.parameters(), lr=0.001)
-    explainer.train()
-    classifier.eval()
-    for epoch in range(explainer.epochs):
-        total_loss = 0.0
-        for data in train_dataset:
-            data = data.to(device)
-            # if data.y.dim() > 1:
-            #     data.y = data.y.squeeze(-1).long()
-            # elif data.y.dim() == 0:
-            #     data.y = data.y.unsqueeze(0).long()
-
-            # with torch.no_grad():
-            _, node_embed = classifier.gnn(data, isbatch=False)
-            data.ori_embeddings = node_embed.to(device)
-
-            loss_dict = explainer.train_loop(data, classifier, epoch=epoch, use_edge_weight=False)
-            loss = sum(loss_dict.values())
-            total_loss += loss.item()
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-        print(f"Epoch {epoch + 1}, Avg Loss: {total_loss / len(train_dataset):.8f}")
-
-    os.makedirs(f'./pge_pretrained/{dataset}', exist_ok=True)
-    torch.save(explainer.state_dict(), f'./pge_pretrained/{dataset}/{dataset}.pkl')
+    # optimizer = torch.optim.Adam(explainer.explainer.parameters(), lr=0.001)
+    # explainer.train()
+    # classifier.eval()
+    # for epoch in range(explainer.epochs):
+    #     total_loss = 0.0
+    #     for data in train_dataset:
+    #         data = data.to(device)
+    #         # if data.y.dim() > 1:
+    #         #     data.y = data.y.squeeze(-1).long()
+    #         # elif data.y.dim() == 0:
+    #         #     data.y = data.y.unsqueeze(0).long()
+    #
+    #         # with torch.no_grad():
+    #         _, node_embed = classifier.gnn(data, isbatch=False)
+    #         data.ori_embeddings = node_embed.to(device)
+    #
+    #         loss_dict = explainer.train_loop(data, classifier, epoch=epoch, use_edge_weight=False)
+    #         loss = sum(loss_dict.values())
+    #         total_loss += loss.item()
+    #
+    #         optimizer.zero_grad()
+    #         loss.backward()
+    #         optimizer.step()
+    #
+    #     print(f"Epoch {epoch + 1}, Avg Loss: {total_loss / len(train_dataset):.8f}")
+    #
+    # os.makedirs(f'./pge_pretrained/{dataset}', exist_ok=True)
+    # torch.save(explainer.state_dict(), f'./pge_pretrained/{dataset}/{dataset}.pkl')
     explainer.load_parameters(path='./pge_pretrained', dataset=dataset)
     explainer.to(device)
 
@@ -490,42 +547,43 @@ if __name__ == "__main__":
     predicted_labels = []
     skipped_graphs = 0
 
-    for data in valid_dataset:
-        data = data.to(device)
-        # if data.y.dim() > 1:  # 张量
-        #     data.y = data.y.squeeze(-1).long()
-        # elif data.y.dim() == 0:  # 标量
-        #     data.y = data.y.unsqueeze(0).long()
-
-        with torch.no_grad():
-            _, node_embed = classifier.gnn(data, isbatch=False)
-        data.ori_embeddings = node_embed
-
-        # Generate explanation
-        edge_mask = explainer(data)
-        # edge_mask = torch.clamp(edge_mask, min=0.01, max=0.99)
-        # Generate subgraph
-        # masked_data = fn_softedgemask(data, edge_mask, isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
-        masked_data = explainer.topk_edge_mask_subgraph(data, edge_mask, isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
-
-        if masked_data is None or masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
-            print(f"Warning: Empty subgraph for graph {data}, skipping...")
-            skipped_graphs += 1
-            continue
-
-        # logits = classifier(masked_data)
-        # pred_prob = F.softmax(logits, dim=-1)  # 概率和为1
-        # # pred_prob = torch.sigmoid(logits).squeeze() #  二分类概率各自属于[0,1]区间，但是各个分类概率互不影响
-
-        true_label, predicted_label = evaluate_single_graph(classifier, explainer, data, device)
-        true_labels.append(true_label)
-        predicted_labels.append(predicted_label)
-
-    accuracy = accuracy_score(true_labels, predicted_labels)
-    conf_matrix = confusion_matrix(true_labels, predicted_labels, labels=list(range(num_classes)))
-    print(f"Accuracy: {accuracy:.4f}")
-    print("Confusion Matrix:")
-    print(conf_matrix)
+    # for data in valid_dataset:
+    #     data = data.to(device)
+    #     # if data.y.dim() > 1:  # 张量
+    #     #     data.y = data.y.squeeze(-1).long()
+    #     # elif data.y.dim() == 0:  # 标量
+    #     #     data.y = data.y.unsqueeze(0).long()
+    #
+    #     with torch.no_grad():
+    #         _, node_embed = classifier.gnn(data, isbatch=False)
+    #     data.ori_embeddings = node_embed
+    #
+    #     # Generate explanation
+    #     edge_mask = explainer(data)
+    #     # edge_mask = torch.clamp(edge_mask, min=0.01, max=0.99)
+    #     # Generate subgraph
+    #     # masked_data = fn_softedgemask(data, edge_mask, isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
+    #     # masked_data = explainer.topk_edge_mask_subgraph(data, edge_mask, rate=0.5,isFidelitPlus=False)  # 需实现：用掩码过滤节点/边
+    #     masked_data = explainer.hard_subgraph_mask(data, edge_mask, rate=0.7,keep_important=True)  # 需实现：用掩码过滤节点/边  # 需实现：用掩码过滤节点/边
+    #
+    #     if masked_data is None or masked_data.num_nodes == 0 or masked_data.edge_index.size(1) == 0:
+    #         print(f"Warning: Empty subgraph for graph {data}, skipping...")
+    #         skipped_graphs += 1
+    #         continue
+    #
+    #     # logits = classifier(masked_data)
+    #     # pred_prob = F.softmax(logits, dim=-1)  # 概率和为1
+    #     # # pred_prob = torch.sigmoid(logits).squeeze() #  二分类概率各自属于[0,1]区间，但是各个分类概率互不影响
+    #
+    #     true_label, predicted_label = evaluate_single_graph(classifier, explainer, data, device)
+    #     true_labels.append(true_label)
+    #     predicted_labels.append(predicted_label)
+    #
+    # accuracy = accuracy_score(true_labels, predicted_labels)
+    # conf_matrix = confusion_matrix(true_labels, predicted_labels, labels=list(range(num_classes)))
+    # print(f"Accuracy: {accuracy:.4f}")
+    # print("Confusion Matrix:")
+    # print(conf_matrix)
 
     with torch.no_grad():
         print("Evaluating fidelity...")
