@@ -10,11 +10,9 @@ from metrics import evaluate_single_graph, calculate_sparsity, compute_fidelity_
 from sklearn.metrics import accuracy_score, confusion_matrix
 from upgnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
     trainClassifier_dd, trainClassifier_mutag, trainClassifier_mutagenicity, trainClassifier_bbbp, \
-    trainClassifier_frankenstein,trainClassifier_ogb
+    trainClassifier_frankenstein, trainClassifier_ogb
 from utils.datasetutils import load_data
 from datetime import datetime
-
-
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
@@ -34,16 +32,15 @@ logging.basicConfig(
 logger = logging.getLogger()
 
 ## In[Settings]
-set_seed(42)
-data_name = 'mutag'
+# set_seed(42)
+data_name = 'bbbp'
 save_path = 'pretrained'
 train_dataset, valid_dataset, test_dataset = load_data(data_name)
 # train_dataset, valid_dataset, test_dataset = load_data("mutagenicity")
 Classifier_path = './best_gnnclassifier/best_gnn_classifier_' + data_name + '.pt'
 # Classifier_path = './best_gnnclassifier/best_gnn_classifier_mutagenicity.pt'
 # pretrained_Explainer_path = './pretrained/pretrained_explainer_graph_' + data_name + '.pt'
-pretrained_Explainer_path = './pretrained/pretrained_explainer_exclude_' + data_name + '.pt'
-# pretrained_Explainer_path = None
+# pretrained_Explainer_path = './pretrained/pretrained_explainer_exclude_' + data_name + '.pt'
 # pretrained_Explainer_path = './pretrained/pretrained_explainer_all.pt'
 # pretrained_Explainer_path = './pretrained/pretrained_explainer_exclude_mutag.pt'
 # pretrained_Explainer_path = './pretrained/pretrained_explainer_graph.pt'
@@ -80,8 +77,8 @@ print(f'edge_dim：{edge_in_dim}')
 # classifier = trainClassifier_ba2motif.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=12,
 #                                                     num_tasks=num_tasks).to(device)
 # mutag
-classifier = trainClassifier_mutag.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
-                                                 num_tasks=num_tasks).to(device)
+# classifier = trainClassifier_mutag.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
+#                                                  num_tasks=num_tasks).to(device)
 # dd
 # classifier = trainClassifier_dd.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
 #                                               num_tasks=num_tasks).to(device)
@@ -101,18 +98,18 @@ classifier = trainClassifier_mutag.GNNClassifier(num_layer=3, emb_dim=node_in_di
 # classifier = trainClassifier_frankenstein.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=300,
 #                                                num_tasks=num_tasks).to(device)
 # bbbp
-# classifier = trainClassifier_bbbp.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=16,
-#                                                 num_tasks=num_tasks).to(device)
+classifier = trainClassifier_bbbp.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=16,
+                                                num_tasks=num_tasks).to(device)
 
 classifier.load_state_dict(torch.load(Classifier_path, weights_only=True))
 PE = Pretrain_Explainer(classifier, 5, 256, device, explain_graph=True, loss_type='NCE')  # 初始化解释器
 
 # TODO: single dataset train...
-# num = int(len(train_dataset) * 0.1)
-# train_sub_dataset = Subset(train_dataset, range(100))  # 前 10%
-# train(PE, train_dataset, valid_dataset, logger, pretrained_Explainer_path, device, epochs=5)
+num = int(len(train_dataset) * 0.1)
+train_sub_dataset = Subset(train_dataset, range(num))  # 前 10%
+train(PE, train_sub_dataset, valid_dataset, logger, device, epochs=5)
 # torch.save(PE.explainer.state_dict(), pretrained_Explainer_path)
-PE.explainer.load_state_dict(torch.load(pretrained_Explainer_path, weights_only=True))
+# PE.explainer.load_state_dict(torch.load(pretrained_Explainer_path, weights_only=True))
 # PE.generate_explanation(test_dataset, device)
 
 print("--------------done!-----------------")
@@ -150,61 +147,61 @@ with torch.no_grad():
     #
     # print("--------------done!-----------------")
 
-    # 逐图测试嵌入
-    print("Testing single graph pred_prob auc...")
-    # 评估模型性能
-    true_labels_test = []
-    predicted_labels_test = []
-    for data in test_dataset:
-        true_label, predicted_label = evaluate_single_graph(classifier, PE, data, device)
-        true_labels_test.append(true_label)
-        # predicted_label = 1.0 if predicted_label == 1 else -1.0  #mutag
-        predicted_labels_test.append(predicted_label)
-
-    # 计算准确率
-    accuracy = accuracy_score(true_labels_test, predicted_labels_test)
-
-    print(f"Accuracy: {accuracy:.4f}")
-
-    # 计算混淆矩阵
-    conf_matrix = confusion_matrix(true_labels_test, predicted_labels_test)
-    print("Confusion Matrix:", conf_matrix)
+    # # 逐图测试嵌入
+    # print("Testing single graph pred_prob auc...")
+    # # 评估模型性能
+    # true_labels_test = []
+    # predicted_labels_test = []
+    # for data in test_dataset:
+    #     true_label, predicted_label = evaluate_single_graph(classifier, PE, data, device)
+    #     true_labels_test.append(true_label)
+    #     # predicted_label = 1.0 if predicted_label == 1 else -1.0  #mutag
+    #     predicted_labels_test.append(predicted_label)
+    #
+    # # 计算准确率
+    # accuracy = accuracy_score(true_labels_test, predicted_labels_test)
+    #
+    # print(f"Accuracy: {accuracy:.4f}")
+    #
+    # # 计算混淆矩阵
+    # conf_matrix = confusion_matrix(true_labels_test, predicted_labels_test)
+    # print("Confusion Matrix:", conf_matrix)
 
 # Confusion Matrix:
 # [[3405  578]   ->   [TP FN]
 # [ 102   28]]   ->   [FP TN]
 
-print("Retuning  ... ")
-train_sub_dataset = Subset(train_dataset, range(100))  # 前 100 个
-retune(PE, train_sub_dataset, device)
-# retune(PE, train_dataset, device)
-PE.generate_explanation(test_dataset, device)
-with torch.no_grad():
-    # # 逐图验证
-    print("Evaluating fidelity...")
-    avg_fidelity_plus = compute_fidelity_plus(classifier, PE, test_dataset, device)
-    print(f"Average Fidelity+: {avg_fidelity_plus:.4f}")
-    avg_fidelity_minus = compute_fidelity_minus(classifier, PE, test_dataset, device)
-    print(f"Average Fidelity-: {avg_fidelity_minus:.4f}")
-    # calculate_sparsity(classifier, PE, test_dataset, device, is_dataloader=False)
-    print("--------------done!-----------------")
-
-    # 逐图测试嵌入
-    print("Testing single graph pred_prob auc...")
-    # 评估模型性能
-    true_labels_test = []
-    predicted_labels_test = []
-    for data in test_dataset:
-        true_label, predicted_label = evaluate_single_graph(classifier, PE, data, device)
-        true_labels_test.append(true_label)
-        # predicted_label = 1.0 if predicted_label == 1 else -1.0  #mutag
-        predicted_labels_test.append(predicted_label)
-
-    # 计算准确率
-    accuracy = accuracy_score(true_labels_test, predicted_labels_test)
-
-    print(f"Accuracy: {accuracy:.4f}")
-
-    # 计算混淆矩阵
-    conf_matrix = confusion_matrix(true_labels_test, predicted_labels_test)
-    print("Confusion Matrix:", conf_matrix)
+# print("Retuning  ... ")
+# # train_sub_dataset = Subset(train_dataset, range(100))  # 前 100 个
+# retune(PE, train_sub_dataset, device)
+# # retune(PE, train_dataset, device)
+# PE.generate_explanation(test_dataset, device)
+# with torch.no_grad():
+#     # # 逐图验证
+#     print("Evaluating fidelity...")
+#     avg_fidelity_plus = compute_fidelity_plus(classifier, PE, test_dataset, device)
+#     print(f"Average Fidelity+: {avg_fidelity_plus:.4f}")
+#     avg_fidelity_minus = compute_fidelity_minus(classifier, PE, test_dataset, device)
+#     print(f"Average Fidelity-: {avg_fidelity_minus:.4f}")
+#     # calculate_sparsity(classifier, PE, test_dataset, device, is_dataloader=False)
+#     print("--------------done!-----------------")
+#
+#     # 逐图测试嵌入
+#     print("Testing single graph pred_prob auc...")
+#     # 评估模型性能
+#     true_labels_test = []
+#     predicted_labels_test = []
+#     for data in test_dataset:
+#         true_label, predicted_label = evaluate_single_graph(classifier, PE, data, device)
+#         true_labels_test.append(true_label)
+#         # predicted_label = 1.0 if predicted_label == 1 else -1.0  #mutag
+#         predicted_labels_test.append(predicted_label)
+#
+#     # 计算准确率
+#     accuracy = accuracy_score(true_labels_test, predicted_labels_test)
+#
+#     print(f"Accuracy: {accuracy:.4f}")
+#
+#     # 计算混淆矩阵
+#     conf_matrix = confusion_matrix(true_labels_test, predicted_labels_test)
+#     print("Confusion Matrix:", conf_matrix)

@@ -85,7 +85,6 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
         # objective parameters for PGExplainer
         self.coff_size = coff_size  # coff_size 太小 → 稀疏惩罚不足  但是如果太大时 → 稀疏 那么生成的解释子图边 呈现出来会很稀疏
         self.coff_ent = coff_ent  # 越大越趋近于 2值化 0 1分布
-        self.coff_max = 0.015
         self.t0 = t0
         self.t1 = t1
         self.loss_type = loss_type
@@ -184,47 +183,59 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
         #  * @param device cup或者cuda设备
         #  * @return 损失函数
         #  */
-        # with torch.no_grad():
+
         # criterion = torch.nn.CrossEntropyLoss()
         embed, node_embed = self.model.gnn(data, isbatch=False)  # 模型参数已经固定不再改变，并得到节点表示向量
 
         # 经过归一化sigmoid 处理节点掩码列表[num_nodes,]、边掩码列表[num_edges,]
         edge_mask = self.explainer(data, node_embed)  # 每一轮模型都要对这些节点和边进行掩码处理
-
         edge_mask = torch.clamp(edge_mask, min=0.01, max=0.99)
-
-        # print(f"Edge mask mean: {edge_mask.mean():.4f}, min: {edge_mask.min():.4f}, max: {edge_mask.max():.4f}")
 
         # 确保edge_mask只有横向一维 默认压缩存在1的维度
         edge_mask = edge_mask.squeeze()
 
-        # F+ 子图：移除高重要性边 非重要结构子图
-        # masked_data_plus = fn_softedgemask(data, edge_mask, isFidelitPlus=True)
         # F- 子图：保留高重要性边 重要结构子图
         masked_data_minus = self.fn_softedgemask(data, edge_mask, isFidelitPlus=False)  # 边权重最小0.01 最大0.99
         # masked_data_minus = self.hard_subgraph_mask(data, edge_mask, keep_important=True)
-        # masked_data_minus = topk_edge_mask(data, edge_mask, isFidelitPlus=False) # 边权重最小0.0 最大1.0
 
         with torch.no_grad():
+            pred = self.model(data)
+            pred_y = torch.argmax(pred, dim=-1).long()  # 0 1
             masked_pred_minus = self.model(masked_data_minus)
 
-        loss_entropy = F.cross_entropy(masked_pred_minus, data.y.long())
+        # loss_entropy = F.cross_entropy(masked_pred_minus, pred_y)
+        input = F.log_softmax(masked_pred_minus, dim=-1)  # log_softmax
+        target = F.softmax(pred, dim=-1)  # softmax
+        loss_entropy = F.kl_div(input, target, reduction='batchmean')
         # loss_entropy = criterion(masked_pred_minus, data.y.long())
 
-        loss_reg = 5e-3 * torch.mean(edge_mask)  # 参数越大 mask掩码越小
-        # 熵项（逐元素）
-        entropy = -edge_mask * torch.log(edge_mask) - (1 - edge_mask) * torch.log(1 - edge_mask)
-        # 完整损失：熵 + L1
-        loss_ent = entropy.sum() + edge_mask.sum()
-
-        reg_ent = loss_reg + 0.02 * loss_ent
-        loss = loss_entropy + 0.1 * reg_ent
-        # loss = loss_ent
+        # 正则
+        size_loss = edge_mask.mean()
+        ent_per_elem = -edge_mask * torch.log(edge_mask) - (1 - edge_mask) * torch.log(1 - edge_mask)
+        ent_loss = ent_per_elem.mean()
+        reg_loss = 0.75 * size_loss + 0.25 * ent_loss
+        total_loss = loss_entropy + reg_loss
 
         return {
-            'total': loss,
-            'ent': reg_ent
+            'total': total_loss,
+            'ent': reg_loss
         }
+
+        # loss_reg = torch.mean(edge_mask)  # 参数越大 mask掩码越小
+        # # 熵项（逐元素）
+        # entropy = -edge_mask * torch.log(edge_mask) - (1 - edge_mask) * torch.log(1 - edge_mask)
+        #
+        # # 完整损失：熵 + L1
+        # loss_ent = entropy.mean() + edge_mask.mean()
+        #
+        # reg_ent = 0.75 * loss_reg + 0.25 * loss_ent
+        # loss = loss_entropy + reg_ent
+        # # loss = loss_ent
+        #
+        # return {
+        #     'total': loss,
+        #     'ent': reg_ent
+        # }
 
         # return loss
 
@@ -255,7 +266,7 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
         neg = F.normalize(neg_embeds, dim=-1)  # [N, D]
 
         # Step 3: 相似度 + 温度缩放（公式核心！）
-        pos_sim = torch.sum(anchor * pos, dim=-1) / tua  # [P]
+        pos_sim = torch.sum(anchor * pos, dim=-1) / tua  # [P]  点积相似度 (嵌入已归一化，则等价于 cosine similarity)
         neg_sim = torch.matmul(anchor, neg.T) / tua  # [N]
 
         # Step 4: 拼接所有样本
@@ -273,7 +284,7 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
 
         return loss
 
-    def generate_negative_subgraphs(self, data, num_negatives=3, edge_drop_ratio=0.8, feature_noise=0.3):
+    def generate_negative_subgraphs(self, data, num_negatives=3, edge_drop_ratio=0.8, feature_noise=0):
 
         """
         生成负样本子图，通过边删除和特征扰动增加区分度。
@@ -749,7 +760,7 @@ def mutiple_embed_explainer_loss(classifiers, explainer, data, y, tmp, device):
     return loss
 
 
-def train(pe, train_dataset, val_dataset, logger, save_path, device, epochs=10):
+def train(pe, train_dataset, val_dataset, logger, device, epochs=10):
     print("开始训练...数据长度为:", len(train_dataset))
     # model.train()
     # classifier.to(device)
@@ -819,14 +830,16 @@ def train(pe, train_dataset, val_dataset, logger, save_path, device, epochs=10):
     # print(f"\nTraining finished. Best Val F+: {best_fid_plus:.4f}, Best Val F-: {best_fid_minus:.4f}")
 
 
-def retune(pe, train_dataset, device, epochs=3):
+def retune(pe, train_dataset, device, epochs=4):
     pe.to(device)
     # # 验证解释器参数的requires_grad状态
     # print("解释器参数的requires_grad状态：")
     # for name, param in pe.explainer.named_parameters():
     #     print(f"{name}: {param.requires_grad}")  # 应均为True
 
-    optimizer = torch.optim.Adam(pe.explainer.parameters(), lr=5e-5, weight_decay=1e-5)  # lr=0.01,0.001  原 0.0001
+    # optimizer = torch.optim.Adam(pe.explainer.parameters(), lr=1e-5, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(pe.explainer.parameters(), lr=1e-5, weight_decay=1e-5)
+    # optimizer = torch.optim.SGD(pe.explainer.parameters(), lr=1e-5, momentum=0.9, weight_decay=1e-5)
 
     for epoch in range(epochs):
         # ==================== 微调阶段 ====================
