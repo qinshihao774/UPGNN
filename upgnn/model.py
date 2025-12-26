@@ -209,7 +209,7 @@ class Pretrain_Explainer(torch.nn.Module):  # 预训练解释器模型
         loss_entropy = F.kl_div(input, target, reduction='batchmean')
         # loss_entropy = criterion(masked_pred_minus, data.y.long())
 
-        # 正则
+        # 正则  标记25-12-26
         size_loss = edge_mask.mean()
         ent_per_elem = -edge_mask * torch.log(edge_mask) - (1 - edge_mask) * torch.log(1 - edge_mask)
         ent_loss = ent_per_elem.mean()
