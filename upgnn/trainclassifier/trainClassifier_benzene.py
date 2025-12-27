@@ -14,7 +14,7 @@ from torch_scatter import scatter_add, scatter
 from torch_geometric.nn.inits import glorot, zeros
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
 
-from upgnn.dataset.benzene import Benzene
+# from upgnn.dataset.benzene import Benzene
 from upgnn.downstream_model import MLP
 from sklearn.metrics import f1_score, roc_auc_score
 from upgnn.dataset.mutag import Mutag
@@ -443,7 +443,7 @@ class GNNClassifier(torch.nn.Module):
         self.gnn.load_state_dict(torch.load(model_file, weights_only=True))
 
 
-def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=200, lr=1e-4):
+def train_gnn_classifier(model, train_dataset, val_dataset, device, epochs=150, lr=1e-4):
     model = model.to(device)
     train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
@@ -555,20 +555,33 @@ def evaluate_single_graph(classifier, graph, device):
         # print("Predicted Probabilities:", pred_prob)
         true_label = graph.y.item()
         predicted_label = torch.argmax(pred_prob, dim=0).item()
-        predicted_label = 1.0 if predicted_label == 1.0 else -1.0
+        # predicted_label = 1.0 if predicted_label == 1.0 else -1.0
     return true_label, predicted_label
 
+def get_num_classes(dataset):
+    if hasattr(dataset, 'num_classes'):
+        return dataset.num_classes
+    # 否则从 list 中推断
+    labels = set()
+    for data in dataset:
+        if data.y is not None:
+            labels.add(data.y.item())
+    return len(labels)
 
 def main():
     set_seed(42)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # 示例数据集（需要替换为实际数据集）
-    # # TODO benzene: Data(x=[12, 7], edge_index=[2, 132], y=[1], node_label=[12])
+    # # TODO benzene: Data(x=[23, 14], edge_index=[2, 48], edge_attr=[48, 5], y=[1], node_mask=[23], edge_mask=[48])
     data_name = "benzene"
-    train_dataset = Benzene(mode="train")
-    valid_dataset = Benzene(mode="valid")
-    test_dataset = Benzene(mode="test")
+    save_root = "../data/benzene/processed/"
+    # train_dataset = Benzene(mode="train")
+    # valid_dataset = Benzene(mode="valid")
+    # test_dataset = Benzene(mode="test")
+    train_dataset = torch.load(os.path.join(save_root, 'train.pt'), weights_only=False)
+    valid_dataset = torch.load(os.path.join(save_root, 'valid.pt'), weights_only=False)
+    test_dataset = torch.load(os.path.join(save_root, 'test.pt'), weights_only=False)
 
     print("single data:", train_dataset[0])
     # # 检查数据集大小
@@ -577,11 +590,11 @@ def main():
     print(f"Test size: {len(test_dataset)}")
     node_in_dim = train_dataset[0].x.shape[1]
     print("node_in_dim:", node_in_dim)
-    print("\n")
-
     # 打印数据集标签的类别
-    num_classes = train_dataset.num_classes
+    num_classes = get_num_classes(train_dataset)
+    # num_classes = train_dataset.num_classes
     print("num_classes:", num_classes)
+    print("\n")
 
     # 初始化模型
     classifier = GNNClassifier(
@@ -591,12 +604,12 @@ def main():
         num_tasks=num_classes
     )
     # TODO: Train benzene classifier
-    best_model_state, history = train_gnn_classifier(
-        classifier,
-        train_dataset,
-        valid_dataset,
-        device
-    )
+    # best_model_state, history = train_gnn_classifier(
+    #     classifier,
+    #     train_dataset,
+    #     valid_dataset,
+    #     device
+    # )
 
     # 保存最佳模型
     save_to = '../best_gnnclassifier/best_gnn_classifier_' + data_name + '.pt'

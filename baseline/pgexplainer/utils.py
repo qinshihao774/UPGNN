@@ -23,7 +23,7 @@ from upgnn.dataset.proteins import PROTEINS
 from upgnn.dataset.synthetic import Synthetic
 from upgnn.trainclassifier import trainClassifier_proteins, trainClassifier_nci1, trainClassifier_ba2motif, \
     trainClassifier_dd, trainClassifier_mutag, trainClassifier_mutagenicity, trainClassifier_frankenstein, \
-    trainClassifier_bbbp,trainClassifier_ogb
+    trainClassifier_bbbp,trainClassifier_ogb,trainClassifier_benzene
 
 from ogb.graphproppred import PygGraphPropPredDataset
 
@@ -349,7 +349,7 @@ def load_data(datatype):
         test_dataset = squeeze_labels(test_dataset)
 
     elif datatype == 'mutag':
-        # # TODO: mutag 创建训练、验证、测试集   y= -1 1
+        # # TODO: mutag 创建训练、验证、测试集   y= 0 1
         train_dataset = Mutag(root='../data/mutag', split='train')
         valid_dataset = Mutag(root='../data/mutag', split='val')
         test_dataset = Mutag(root='../data/mutag', split='test')
@@ -431,6 +431,12 @@ def load_data(datatype):
         valid_dataset = GraphDataset(data, slices, valid_idx)
         test_dataset = GraphDataset(data, slices, test_idx)
 
+    elif datatype == 'benzene':
+        # TODO: benzene 创建训练、验证、测试集   y= 0 1
+        train_dataset = torch.load('../data/benzene/processed/train.pt', weights_only=False)
+        valid_dataset = torch.load('../data/benzene/processed/valid.pt', weights_only=False)
+        test_dataset = torch.load('../data/benzene/processed/test.pt', weights_only=False)
+
     return train_dataset, valid_dataset, test_dataset
 
 
@@ -485,6 +491,9 @@ def select_func(data_name, device):
     elif data_name == 'bbbp':
         classifier = trainClassifier_bbbp.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=16,
                                                         num_tasks=num_tasks).to(device)
+    elif data_name == 'benzene':
+        classifier = trainClassifier_benzene.GNNClassifier(num_layer=3, emb_dim=node_in_dim, hidden_dim=32,
+                                                       num_tasks=num_tasks).to(device)
 
     classifier.load_state_dict(torch.load(Classifier_path, weights_only=True))  # 加载预训练分类器
 

@@ -33,7 +33,7 @@ logger = logging.getLogger()
 
 ## In[Settings]
 set_seed(42)
-dataset_list = ['ba2motif', 'bbbp', 'mutag', 'nci1', 'proteins', 'dd', 'mutagenicity', 'ogb', 'frankenstein']
+dataset_list = ['ba2motif', 'bbbp', 'mutag', 'nci1', 'proteins', 'dd', 'mutagenicity', 'ogb', 'frankenstein', 'benzene']
 
 save_path = 'pretrained'
 # train_dataset, valid_dataset, test_dataset = load_data(data_name)

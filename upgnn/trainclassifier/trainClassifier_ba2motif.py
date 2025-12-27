@@ -543,12 +543,12 @@ def main():
     print(f"Test size: {len(test_dataset)}")
     node_in_dim = train_dataset[0].x.shape[1]
     print("node_in_dim:", node_in_dim)
-
+    # gt
     print("exp_gt:", train_dataset[0].exp_gt)
-    print("\n")
-
     # 打印数据集标签的类别
     num_classes = train_dataset.num_classes
+    print("num_classes:", num_classes)
+    print("\n")
 
     # 初始化模型
     classifier = GNNClassifier(

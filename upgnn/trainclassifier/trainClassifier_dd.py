@@ -577,12 +577,12 @@ def main():
     print(f"Test size: {len(test_dataset)}")
     node_in_dim = train_dataset[0].x.shape[1]
     print("node_in_dim:", node_in_dim)
-    print("\n")
     # 打印数据集标签的类别
     all_labels = [data.y.item() for data in train_dataset]
     num_classes = len(set(all_labels))
     print("num_classes:", num_classes)
     num_tasks = num_classes
+    print("\n")
 
     # 初始化模型
     classifier = GNNClassifier(
